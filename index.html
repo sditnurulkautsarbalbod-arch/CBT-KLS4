@@ -3658,10 +3658,8 @@
             },
 
             getYearOptions(selected) {
-                const currentYear = new Date().getFullYear();
                 let options = '';
-                for (let i = 0; i < 10; i++) {
-                    const year = currentYear - 5 + i; // Show past 5 years and next 5 years
+				for (let year = 2024; year <= 2034; year++) {
                     const academicYear = `${year}/${year + 1}`;
                     options += `<option value="${academicYear}" ${selected === academicYear ? 'selected' : ''}>${academicYear}</option>`;
                 }
