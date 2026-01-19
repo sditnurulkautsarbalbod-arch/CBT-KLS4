@@ -3125,17 +3125,6 @@
                                         <a href="https://aistudio.google.com/app/apikey" target="_blank" class="hover:underline">Dapatkan API Key di sini</a>
                                     </div>
                                 </div>
-                                <hr class="my-6 border-gray-200">
-                                <div class="mb-6">
-                                    <label class="block text-lg font-medium text-gray-700 mb-2">Cache Lokal (IndexedDB)</label>
-                                    <p class="text-sm text-gray-500 mb-3">Kelola cache data lokal untuk mempercepat loading aplikasi.</p>
-                                    <button type="button" id="clearCacheBtn" class="bg-yellow-500 text-white px-4 py-2 rounded-lg hover:bg-yellow-600 transition duration-200">
-                                        <i class="fas fa-broom mr-2"></i>Bersihkan Cache
-                                    </button>
-                                    <button type="button" id="syncCacheBtn" class="ml-2 bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 transition duration-200">
-                                        <i class="fas fa-sync mr-2"></i>Sinkronisasi Ulang
-                                    </button>
-                                </div>
                                 <div class="flex justify-end">
                                     <button type="submit" class="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition duration-200 font-semibold">
                                         <i class="fas fa-save mr-2"></i>Simpan Pengaturan
@@ -3146,81 +3135,6 @@
                         <div id="blockedStudentsSection" class="mt-12"></div>
                     </div>
                 `;
-
-                // Clear Cache Button
-                document.getElementById('clearCacheBtn').addEventListener('click', async () => {
-                    const btn = document.getElementById('clearCacheBtn');
-                    btn.disabled = true;
-                    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Membersihkan...';
-                    
-                    try {
-                        await IndexedDBHelper.init();
-                        await IndexedDBHelper.clearStore('settings');
-                        await IndexedDBHelper.clearStore('users');
-                        await IndexedDBHelper.clearStore('questions');
-                        await IndexedDBHelper.clearStore('results');
-                        await IndexedDBHelper.clearStore('grades');
-                        await IndexedDBHelper.clearStore('blockedStudents');
-                        await IndexedDBHelper.clearStore('cacheMetadata');
-                        UI.showNotification('Cache berhasil dibersihkan!', 'success');
-                    } catch (error) {
-                        console.error('Error clearing cache:', error);
-                        UI.showNotification('Gagal membersihkan cache!', 'error');
-                    } finally {
-                        btn.disabled = false;
-                        btn.innerHTML = '<i class="fas fa-broom mr-2"></i>Bersihkan Cache';
-                    }
-                });
-
-                // Sync Cache Button
-                document.getElementById('syncCacheBtn').addEventListener('click', async () => {
-                    const btn = document.getElementById('syncCacheBtn');
-                    btn.disabled = true;
-                    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Sinkronisasi...';
-                    
-                    try {
-                        await IndexedDBHelper.init();
-                        
-                        // Sync settings
-                        const settingsResult = await callGoogleScript('GET', { action: 'getSettings', key: 'examConfig' });
-                        if (settingsResult.status === 'success' && settingsResult.data) {
-                            await IndexedDBHelper.saveToStore('settings', {
-                                key: 'examConfig',
-                                durationMinutes: settingsResult.data.durationMinutes || 60,
-                                lastUpdated: Date.now()
-                            });
-                        }
-                        
-                        // Sync users
-                        const usersResult = await callGoogleScript('GET', { action: 'getUsers' });
-                        if (usersResult.status === 'success' && usersResult.data) {
-                            await IndexedDBHelper.clearStore('users');
-                            await IndexedDBHelper.saveToStore('users', usersResult.data);
-                            await IndexedDBHelper.updateCacheTimestamp('users');
-                        }
-                        
-                        // Sync blocked students
-                        const blockedResult = await callGoogleScript('GET', { action: 'getBlockedStudents' });
-                        if (blockedResult.status === 'success' && blockedResult.data) {
-                            await IndexedDBHelper.clearStore('blockedStudents');
-                            await IndexedDBHelper.saveToStore('blockedStudents', blockedResult.data);
-                            await IndexedDBHelper.updateCacheTimestamp('blockedStudents');
-                        }
-                        
-                        UI.showNotification('Sinkronisasi cache berhasil!', 'success');
-                        
-                        // Refresh the settings display
-                        if (settingsResult.status === 'success' && settingsResult.data) {
-                            document.getElementById('examDuration').value = settingsResult.data.durationMinutes || 60;
-                        }
-                    } catch (error) {
-                        console.error('Error syncing cache:', error);
-                        UI.showNotification('Gagal sinkronisasi cache!', 'error');
-                    } finally {
-                        btn.disabled = false;
-                        btn.innerHTML = '<i class="fas fa-sync mr-2"></i>Sinkronisasi Ulang';
-                    }
-                });
 
                 document.getElementById('settingsForm').addEventListener('submit', async (e) => {
                     e.preventDefault();
@@ -4722,7 +4636,7 @@
             });
             document.getElementById('dashboardLogoutBtn').addEventListener('click', () => UI.showConfirmModal('Konfirmasi Keluar', 'Apakah Anda yakin ingin keluar?', () => Auth.logout()));
             document.getElementById('closeModalBtn').addEventListener('click', () => UI.hideModal());
-            document.getElementById('managementModal').addEventListener('click', (e) => { if (e.target === e.currentTarget) UI.hideModal(); });
+            // Modal hanya bisa ditutup dengan tombol, tidak bisa klik di luar modal
             
             // Listener for Question List Modal
             document.getElementById('questionListBtn').addEventListener('click', () => UI.showQuestionListModal());
