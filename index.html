@@ -14,6 +14,22 @@
     <!-- IndexedDB untuk caching lokal -->
 
     <style>
+        /* Prevent text selection */
+        * {
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none;
+        }
+        
+        /* Allow text selection only in input fields and textareas */
+        input, textarea, [contenteditable="true"] {
+            -webkit-user-select: text;
+            -moz-user-select: text;
+            -ms-user-select: text;
+            user-select: text;
+        }
+        
         .fade-in { animation: fadeIn 0.5s ease-in; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
         .timer-warning { animation: pulse 1s infinite; }
@@ -268,11 +284,12 @@
         import { GoogleGenAI, Type } from "@google/genai";
 
         // =================================================================
-        // INDEXEDDB HELPER - Untuk caching data lokal dan loading cepat
+        // INDEXEDDB HELPER - Database lokal utama
+        // Arsitektur: Web App → IndexedDB → Google Apps Script
         // =================================================================
         const IndexedDBHelper = {
             dbName: 'CBT_SDIT_NK',
-            dbVersion: 1,
+            dbVersion: 2, // Upgrade version untuk pendingSync store
             db: null,
 
             async init() {
@@ -318,6 +335,12 @@
                         // Store untuk cache metadata
                         if (!db.objectStoreNames.contains('cacheMetadata')) {
                             db.createObjectStore('cacheMetadata', { keyPath: 'storeName' });
+                        }
+                        // Store untuk pending sync queue (NEW)
+                        if (!db.objectStoreNames.contains('pendingSync')) {
+                            const pendingStore = db.createObjectStore('pendingSync', { keyPath: 'syncId', autoIncrement: true });
+                            pendingStore.createIndex('timestamp', 'timestamp', { unique: false });
+                            pendingStore.createIndex('status', 'status', { unique: false });
                         }
                     };
                 });
@@ -386,6 +409,517 @@
                 if (!metadata) return false;
                 const age = (Date.now() - metadata.lastUpdated) / 1000 / 60;
                 return age < maxAgeMinutes;
+            },
+            
+            // Get all data by index
+            async getByIndex(storeName, indexName, value) {
+                if (!this.db) await this.init();
+                return new Promise((resolve, reject) => {
+                    const transaction = this.db.transaction([storeName], 'readonly');
+                    const store = transaction.objectStore(storeName);
+                    const index = store.index(indexName);
+                    const request = index.getAll(value);
+                    request.onsuccess = () => resolve(request.result);
+                    request.onerror = () => reject(request.error);
+                });
+            }
+        };
+
+        // =================================================================
+        // SYNC MANAGER - Mengelola sinkronisasi IndexedDB ↔ Google Apps Script
+        // Arsitektur: Web App → IndexedDB → Google Apps Script
+        // =================================================================
+        const SyncManager = {
+            isOnline: navigator.onLine,
+            isSyncing: false,
+            syncInterval: null,
+            
+            // Initialize SyncManager
+            async init() {
+                await IndexedDBHelper.init();
+                
+                // Listen for online/offline events
+                window.addEventListener('online', () => {
+                    this.isOnline = true;
+                    this.updateOnlineIndicator();
+                    this.processQueue(); // Process pending sync when back online
+                });
+                
+                window.addEventListener('offline', () => {
+                    this.isOnline = false;
+                    this.updateOnlineIndicator();
+                });
+                
+                // Start periodic sync (every 30 seconds)
+                this.syncInterval = setInterval(() => {
+                    if (this.isOnline) this.processQueue();
+                }, 30000);
+                
+                // Initial sync check
+                this.updateOnlineIndicator();
+                if (this.isOnline) {
+                    setTimeout(() => this.processQueue(), 2000);
+                }
+            },
+            
+            // Update online/offline indicator in UI
+            updateOnlineIndicator() {
+                let indicator = document.getElementById('syncIndicator');
+                if (!indicator) {
+                    // Create indicator if not exists
+                    indicator = document.createElement('div');
+                    indicator.id = 'syncIndicator';
+                    indicator.style.cssText = 'position:fixed;bottom:20px;right:20px;padding:8px 16px;border-radius:20px;font-size:12px;z-index:9999;display:flex;align-items:center;gap:8px;box-shadow:0 2px 10px rgba(0,0,0,0.2);';
+                    document.body.appendChild(indicator);
+                }
+                
+                if (this.isOnline) {
+                    indicator.style.backgroundColor = '#10B981';
+                    indicator.style.color = 'white';
+                    indicator.innerHTML = '<i class="fas fa-wifi"></i> Online';
+                } else {
+                    indicator.style.backgroundColor = '#EF4444';
+                    indicator.style.color = 'white';
+                    indicator.innerHTML = '<i class="fas fa-wifi-slash"></i> Offline';
+                }
+            },
+            
+            // Add operation to pending sync queue
+            async addToQueue(action, storeName, data) {
+                const syncItem = {
+                    action: action,
+                    storeName: storeName,
+                    data: data,
+                    timestamp: Date.now(),
+                    status: 'pending',
+                    retryCount: 0
+                };
+                
+                await IndexedDBHelper.saveToStore('pendingSync', syncItem);
+                
+                // Try to sync immediately if online
+                if (this.isOnline && !this.isSyncing) {
+                    this.processQueue();
+                }
+            },
+            
+            // Process pending sync queue
+            async processQueue() {
+                if (this.isSyncing || !this.isOnline) return;
+                
+                this.isSyncing = true;
+                this.showSyncingIndicator();
+                
+                try {
+                    const pendingItems = await IndexedDBHelper.getFromStore('pendingSync');
+                    const itemsToSync = pendingItems.filter(item => item.status === 'pending');
+                    
+                    if (itemsToSync.length === 0) {
+                        this.isSyncing = false;
+                        this.hideSyncingIndicator();
+                        return;
+                    }
+                    
+                    for (const item of itemsToSync) {
+                        try {
+                            // Sync to Google Apps Script
+                            const result = await this.syncToServer(item);
+                            
+                            if (result.success) {
+                                // Remove from pending queue
+                                await IndexedDBHelper.deleteFromStore('pendingSync', item.syncId);
+                            } else {
+                                // Mark as failed, increment retry count
+                                item.retryCount++;
+                                item.status = item.retryCount >= 3 ? 'failed' : 'pending';
+                                item.lastError = result.error;
+                                await IndexedDBHelper.saveToStore('pendingSync', item);
+                            }
+                        } catch (error) {
+                            console.error('Sync error for item:', item, error);
+                            item.retryCount++;
+                            item.status = item.retryCount >= 3 ? 'failed' : 'pending';
+                            item.lastError = error.message;
+                            await IndexedDBHelper.saveToStore('pendingSync', item);
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error processing sync queue:', error);
+                } finally {
+                    this.isSyncing = false;
+                    this.hideSyncingIndicator();
+                }
+            },
+            
+            // Sync single item to server
+            async syncToServer(item) {
+                try {
+                    const method = ['add', 'update', 'save'].some(a => item.action.toLowerCase().includes(a)) ? 'POST' : 'GET';
+                    
+                    const payload = method === 'POST' 
+                        ? { action: item.action, data: item.data }
+                        : { action: item.action, ...item.data };
+                    
+                    const result = await callGoogleScript(method, payload);
+                    
+                    if (result.status === 'success') {
+                        return { success: true };
+                    } else {
+                        return { success: false, error: result.message || 'Unknown error' };
+                    }
+                } catch (error) {
+                    return { success: false, error: error.message };
+                }
+            },
+            
+            // Show syncing indicator
+            showSyncingIndicator() {
+                let indicator = document.getElementById('syncIndicator');
+                if (indicator && this.isOnline) {
+                    indicator.style.backgroundColor = '#F59E0B';
+                    indicator.innerHTML = '<i class="fas fa-sync fa-spin"></i> Sinkronisasi...';
+                }
+            },
+            
+            // Hide syncing indicator
+            hideSyncingIndicator() {
+                this.updateOnlineIndicator();
+            },
+            
+            // Get pending count
+            async getPendingCount() {
+                const pending = await IndexedDBHelper.getFromStore('pendingSync');
+                return pending.filter(p => p.status === 'pending').length;
+            },
+            
+            // Force sync all pending items
+            async forceSync() {
+                if (!this.isOnline) {
+                    UI.showNotification('Tidak dapat sinkronisasi. Anda sedang offline.', 'error');
+                    return;
+                }
+                await this.processQueue();
+                UI.showNotification('Sinkronisasi selesai!', 'success');
+            },
+            
+            // Pull data from server and update local
+            async pullFromServer(storeName, action, params = {}) {
+                if (!this.isOnline) {
+                    // Return cached data if offline
+                    return await IndexedDBHelper.getFromStore(storeName);
+                }
+                
+                try {
+                    const result = await callGoogleScript('GET', { action: action, ...params });
+                    
+                    if (result.status === 'success' && result.data) {
+                        // Update local IndexedDB
+                        await IndexedDBHelper.clearStore(storeName);
+                        if (result.data.length > 0) {
+                            await IndexedDBHelper.saveToStore(storeName, result.data);
+                        }
+                        await IndexedDBHelper.updateCacheTimestamp(storeName);
+                        return result.data;
+                    }
+                } catch (error) {
+                    console.error(`Error pulling ${storeName} from server:`, error);
+                }
+                
+                // Fallback to cached data
+                return await IndexedDBHelper.getFromStore(storeName);
+            }
+        };
+
+        // =================================================================
+        // DATA SERVICE - Layer untuk operasi CRUD dengan arsitektur baru
+        // Web App → IndexedDB → Google Apps Script
+        // =================================================================
+        const DataService = {
+            // ============ USERS ============
+            async getUsers(forceRefresh = false) {
+                await IndexedDBHelper.init();
+                
+                if (!forceRefresh) {
+                    const isValid = await IndexedDBHelper.isCacheValid('users', 5);
+                    if (isValid) {
+                        return await IndexedDBHelper.getFromStore('users');
+                    }
+                }
+                
+                return await SyncManager.pullFromServer('users', 'getUsers');
+            },
+            
+            async addUser(userData) {
+                await IndexedDBHelper.init();
+                await IndexedDBHelper.saveToStore('users', userData);
+                await SyncManager.addToQueue('addUser', 'users', userData);
+                return { success: true };
+            },
+            
+            async updateUser(userData) {
+                await IndexedDBHelper.init();
+                await IndexedDBHelper.saveToStore('users', userData);
+                await SyncManager.addToQueue('updateUser', 'users', userData);
+                return { success: true };
+            },
+            
+            async deleteUser(username) {
+                await IndexedDBHelper.init();
+                await IndexedDBHelper.deleteFromStore('users', username);
+                await SyncManager.addToQueue('deleteUser', 'users', { username: username });
+                return { success: true };
+            },
+            
+            // ============ QUESTIONS ============
+            async getQuestions(kode = null, forceRefresh = false) {
+                await IndexedDBHelper.init();
+                
+                if (kode) {
+                    // Get by kode
+                    if (!forceRefresh) {
+                        const cached = await IndexedDBHelper.getByIndex('questions', 'kode', kode);
+                        if (cached && cached.length > 0) return cached;
+                    }
+                    const result = await SyncManager.pullFromServer('questions', 'getQuestions', { kode: kode });
+                    return result || [];
+                }
+                
+                if (!forceRefresh) {
+                    const isValid = await IndexedDBHelper.isCacheValid('questions', 5);
+                    if (isValid) {
+                        return await IndexedDBHelper.getFromStore('questions');
+                    }
+                }
+                
+                return await SyncManager.pullFromServer('questions', 'getQuestions');
+            },
+            
+            async addQuestion(questionData) {
+                await IndexedDBHelper.init();
+                await IndexedDBHelper.saveToStore('questions', questionData);
+                await SyncManager.addToQueue('addQuestion', 'questions', questionData);
+                return { success: true };
+            },
+            
+            async addQuestions(questionsArray) {
+                await IndexedDBHelper.init();
+                await IndexedDBHelper.saveToStore('questions', questionsArray);
+                await SyncManager.addToQueue('addQuestions', 'questions', questionsArray);
+                return { success: true };
+            },
+            
+            async updateQuestion(questionData) {
+                await IndexedDBHelper.init();
+                await IndexedDBHelper.saveToStore('questions', questionData);
+                await SyncManager.addToQueue('updateQuestion', 'questions', questionData);
+                return { success: true };
+            },
+            
+            async deleteQuestion(questionId) {
+                await IndexedDBHelper.init();
+                await IndexedDBHelper.deleteFromStore('questions', questionId);
+                await SyncManager.addToQueue('deleteQuestion', 'questions', { id: questionId });
+                return { success: true };
+            },
+            
+            async deleteQuestions(questionIds) {
+                await IndexedDBHelper.init();
+                for (const id of questionIds) {
+                    await IndexedDBHelper.deleteFromStore('questions', id);
+                }
+                await SyncManager.addToQueue('deleteQuestions', 'questions', { ids: questionIds });
+                return { success: true };
+            },
+            
+            // ============ RESULTS ============
+            async getResults(filters = {}, forceRefresh = false) {
+                await IndexedDBHelper.init();
+                
+                if (!forceRefresh) {
+                    const cached = await IndexedDBHelper.getFromStore('results');
+                    if (cached && cached.length > 0) {
+                        // Filter locally
+                        let filtered = cached;
+                        if (filters.namaLengkap) filtered = filtered.filter(r => r.namaLengkap === filters.namaLengkap);
+                        if (filters.kodesoal) filtered = filtered.filter(r => r.kodesoal === filters.kodesoal);
+                        if (filters.kelas) filtered = filtered.filter(r => r.kelas === filters.kelas);
+                        if (filters.mataPelajaran) filtered = filtered.filter(r => r.mataPelajaran === filters.mataPelajaran);
+                        if (filters.tahunAjaran) filtered = filtered.filter(r => r.tahunAjaran === filters.tahunAjaran);
+                        if (filters.semester) filtered = filtered.filter(r => r.semester === filters.semester);
+                        return filtered;
+                    }
+                }
+                
+                const params = { action: 'getResults', ...filters };
+                const result = await callGoogleScript('GET', params);
+                if (result.status === 'success' && result.data) {
+                    await IndexedDBHelper.saveToStore('results', result.data);
+                    return result.data;
+                }
+                return [];
+            },
+            
+            async addResults(resultsArray) {
+                await IndexedDBHelper.init();
+                await IndexedDBHelper.saveToStore('results', resultsArray);
+                await SyncManager.addToQueue('addResults', 'results', resultsArray);
+                return { success: true };
+            },
+            
+            async updateResult(resultData) {
+                await IndexedDBHelper.init();
+                const existing = await IndexedDBHelper.getFromStore('results', resultData.resultId);
+                const updated = { ...existing, ...resultData };
+                await IndexedDBHelper.saveToStore('results', updated);
+                await SyncManager.addToQueue('updateResult', 'results', resultData);
+                return { success: true };
+            },
+            
+            async deleteResults(filters) {
+                await IndexedDBHelper.init();
+                const all = await IndexedDBHelper.getFromStore('results');
+                let toDelete = all;
+                if (filters.kodesoal) toDelete = toDelete.filter(r => r.kodesoal === filters.kodesoal);
+                if (filters.namaLengkap) toDelete = toDelete.filter(r => r.namaLengkap === filters.namaLengkap);
+                
+                for (const item of toDelete) {
+                    await IndexedDBHelper.deleteFromStore('results', item.resultId);
+                }
+                await SyncManager.addToQueue('deleteResults', 'results', filters);
+                return { success: true };
+            },
+            
+            // ============ GRADES ============
+            async getGrades(filters = {}, forceRefresh = false) {
+                await IndexedDBHelper.init();
+                
+                if (!forceRefresh) {
+                    const cached = await IndexedDBHelper.getFromStore('grades');
+                    if (cached && cached.length > 0) {
+                        let filtered = cached;
+                        if (filters.namaSiswa) filtered = filtered.filter(g => g.namaSiswa === filters.namaSiswa);
+                        if (filters.kodeSoal) filtered = filtered.filter(g => g.kodeSoal.toLowerCase().includes(filters.kodeSoal.toLowerCase()));
+                        if (filters.kelas) filtered = filtered.filter(g => g.kelas === filters.kelas);
+                        if (filters.mataPelajaran) filtered = filtered.filter(g => g.mataPelajaran === filters.mataPelajaran);
+                        if (filters.tahunAjaran) filtered = filtered.filter(g => g.tahunAjaran === filters.tahunAjaran);
+                        if (filters.semester) filtered = filtered.filter(g => g.semester === filters.semester);
+                        return filtered;
+                    }
+                }
+                
+                const params = { action: 'getGrades', ...filters };
+                const result = await callGoogleScript('GET', params);
+                if (result.status === 'success' && result.data) {
+                    await IndexedDBHelper.saveToStore('grades', result.data);
+                    return result.data;
+                }
+                return [];
+            },
+            
+            async addGrade(gradeData) {
+                await IndexedDBHelper.init();
+                await IndexedDBHelper.saveToStore('grades', gradeData);
+                await SyncManager.addToQueue('addGrade', 'grades', gradeData);
+                return { success: true };
+            },
+            
+            async updateGrade(gradeData) {
+                await IndexedDBHelper.init();
+                const existing = await IndexedDBHelper.getFromStore('grades', gradeData.gradeId);
+                const updated = { ...existing, ...gradeData };
+                await IndexedDBHelper.saveToStore('grades', updated);
+                await SyncManager.addToQueue('updateGrade', 'grades', gradeData);
+                return { success: true };
+            },
+            
+            async deleteGrade(gradeId) {
+                await IndexedDBHelper.init();
+                await IndexedDBHelper.deleteFromStore('grades', gradeId);
+                await SyncManager.addToQueue('deleteGrade', 'grades', { gradeId: gradeId });
+                return { success: true };
+            },
+            
+            async deleteGrades(gradeIds) {
+                await IndexedDBHelper.init();
+                for (const id of gradeIds) {
+                    await IndexedDBHelper.deleteFromStore('grades', id);
+                }
+                await SyncManager.addToQueue('deleteGrades', 'grades', { gradeIds: gradeIds });
+                return { success: true };
+            },
+            
+            // ============ BLOCKED STUDENTS ============
+            async getBlockedStudents(forceRefresh = false) {
+                await IndexedDBHelper.init();
+                
+                if (!forceRefresh) {
+                    const isValid = await IndexedDBHelper.isCacheValid('blockedStudents', 5);
+                    if (isValid) {
+                        return await IndexedDBHelper.getFromStore('blockedStudents');
+                    }
+                }
+                
+                return await SyncManager.pullFromServer('blockedStudents', 'getBlockedStudents');
+            },
+            
+            async blockStudent(blockData) {
+                await IndexedDBHelper.init();
+                await IndexedDBHelper.saveToStore('blockedStudents', blockData);
+                await SyncManager.addToQueue('blockStudent', 'blockedStudents', blockData);
+                return { success: true };
+            },
+            
+            async unblockStudent(blockId) {
+                await IndexedDBHelper.init();
+                await IndexedDBHelper.deleteFromStore('blockedStudents', blockId);
+                await SyncManager.addToQueue('unblockStudent', 'blockedStudents', { blockId: blockId });
+                return { success: true };
+            },
+            
+            async unblockAllStudents() {
+                await IndexedDBHelper.init();
+                await IndexedDBHelper.clearStore('blockedStudents');
+                await SyncManager.addToQueue('unblockAllStudents', 'blockedStudents', {});
+                return { success: true };
+            },
+            
+            async isStudentBlocked(username, examCode) {
+                await IndexedDBHelper.init();
+                const blocked = await IndexedDBHelper.getFromStore('blockedStudents');
+                return blocked.some(b => b.username === username && b.examCode === examCode);
+            },
+            
+            // ============ SETTINGS ============
+            async getSettings(key = 'examConfig') {
+                await IndexedDBHelper.init();
+                
+                // Try local first
+                const cached = await IndexedDBHelper.getFromStore('settings', key);
+                if (cached) return cached;
+                
+                // Fetch from server
+                if (SyncManager.isOnline) {
+                    try {
+                        const result = await callGoogleScript('GET', { action: 'getSettings', key: key });
+                        if (result.status === 'success' && result.data) {
+                            const settings = { key: key, ...result.data, lastUpdated: Date.now() };
+                            await IndexedDBHelper.saveToStore('settings', settings);
+                            return settings;
+                        }
+                    } catch (error) {
+                        console.error('Error fetching settings:', error);
+                    }
+                }
+                
+                return { key: key, durationMinutes: 60 }; // Default
+            },
+            
+            async saveSettings(settingsData) {
+                await IndexedDBHelper.init();
+                const data = { key: 'examConfig', ...settingsData, lastUpdated: Date.now() };
+                await IndexedDBHelper.saveToStore('settings', data);
+                await SyncManager.addToQueue('saveSettings', 'settings', settingsData);
+                return { success: true };
             }
         };
 
@@ -710,26 +1244,40 @@
         }
         
         // =================================================================
-        // DATA FETCHING
+        // DATA FETCHING - Menggunakan arsitektur IndexedDB → Google Apps Script
         // =================================================================
         async function fetchUsersFromGoogleScript() {
             try {
-                const result = await callGoogleScript('GET', { action: 'getUsers' });
-                if (result.status === 'success' && Array.isArray(result.data)) {
-                    AppState.users = result.data.map((user, index) => ({
+                // Arsitektur baru: IndexedDB first, then sync from server
+                const users = await DataService.getUsers();
+                
+                if (users && Array.isArray(users) && users.length > 0) {
+                    AppState.users = users.map((user, index) => ({
                         ...user,
-                        id: `gs-user-${index}`
+                        id: user.id || `gs-user-${index}`
                     }));
-                    console.log('User data loaded successfully from Google Script.');
+                    console.log('User data loaded successfully from IndexedDB/Server.');
                     return true;
                 } else {
-                    throw new Error('Invalid data format received from Google Script for users.');
+                    // Try force refresh from server
+                    const freshUsers = await DataService.getUsers(true);
+                    if (freshUsers && Array.isArray(freshUsers) && freshUsers.length > 0) {
+                        AppState.users = freshUsers.map((user, index) => ({
+                            ...user,
+                            id: user.id || `gs-user-${index}`
+                        }));
+                        console.log('User data loaded successfully from Server.');
+                        return true;
+                    }
+                    throw new Error('No user data available.');
                 }
             } catch (error) {
                 console.error('Failed to fetch user data:', error);
                 const loginError = document.getElementById('loginError');
-                loginError.textContent = 'Gagal memuat data pengguna. Silakan muat ulang halaman.';
-                loginError.classList.remove('hidden');
+                if (loginError) {
+                    loginError.textContent = 'Gagal memuat data pengguna. Silakan muat ulang halaman.';
+                    loginError.classList.remove('hidden');
+                }
                 return false;
             }
         }
@@ -1054,9 +1602,9 @@
             unblockStudent(blockId) {
                 UI.showConfirmModal('Konfirmasi Buka Blokir', 'Anda yakin ingin membuka blokir siswa ini?', async () => {
                     try {
-                        await callGoogleScript('POST', { action: 'unblockStudent', data: { blockId: blockId } });
+                        await DataService.unblockStudent(blockId);
                         UI.showNotification('Blokir siswa berhasil dibuka!', 'success');
-                        UI.renderBlockedStudents(); // Refresh just the list
+                        UI.renderBlockedStudents();
                     } catch (error) {
                         console.error("Error unblocking student: ", error);
                         UI.showNotification('Gagal membuka blokir siswa!', 'error');
@@ -1073,10 +1621,10 @@
                         didOpen: () => { Swal.showLoading(); }
                     });
                     try {
-                        await callGoogleScript('POST', { action: 'unblockAllStudents', data: {} });
+                        await DataService.unblockAllStudents();
                         Swal.close();
                         UI.showNotification('Semua blokir siswa berhasil dibuka!', 'success');
-                        UI.renderBlockedStudents(); // Refresh the view
+                        UI.renderBlockedStudents();
                     } catch (error) {
                         Swal.close();
                         console.error("Error unblocking all students: ", error);
@@ -2077,23 +2625,21 @@
 
             async recalculateFinalGrade(studentName, examCode) {
                 try {
-                    // Fetch all results for this student and exam from Google Sheets
-                    const result = await callGoogleScript('GET', {
-                        action: 'getResults',
+                    // Fetch all results for this student and exam from DataService
+                    const studentResults = await DataService.getResults({
                         namaLengkap: studentName,
                         kodesoal: examCode
                     });
             
-                    if (result.status !== 'success') {
-                        throw new Error('Could not fetch student results from Google Sheet for recalculation.');
+                    if (!studentResults || studentResults.length === 0) {
+                        console.warn('No results found for recalculation.');
+                        return;
                     }
-                    
-                    const studentResults = result.data;
 
-                    // Fetch total questions from Google Sheets
-                    const questionResult = await callGoogleScript('GET', { action: 'getQuestions', kode: examCode });
-                    if (questionResult.status !== 'success' || questionResult.data.length === 0) return;
-                    const totalQuestionsForExam = questionResult.data.length;
+                    // Fetch total questions from DataService
+                    const questions = await DataService.getQuestions(examCode);
+                    if (!questions || questions.length === 0) return;
+                    const totalQuestionsForExam = questions.length;
 
                     let totalScore = 0;
                     studentResults.forEach(r => {
@@ -2105,23 +2651,19 @@
                     const finalScore = Math.round(totalScore / totalQuestionsForExam);
                     const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     
-                    // Update grade in Google Sheets
-                    const gradeResult = await callGoogleScript('GET', {
-                        action: 'getGrades',
+                    // Find existing grade
+                    const existingGrades = await DataService.getGrades({
                         namaSiswa: studentName,
                         kodeSoal: examCode
                     });
 
-                    if (gradeResult.status === 'success' && gradeResult.data.length > 0) {
-                        const existingGrade = gradeResult.data[0];
-                        await callGoogleScript('POST', {
-                            action: 'updateGrade',
-                            data: {
-                                gradeId: existingGrade.gradeId,
-                                nilai: finalScore,
-                                grade: grade,
-                                keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
-                            }
+                    if (existingGrades && existingGrades.length > 0) {
+                        const existingGrade = existingGrades[0];
+                        await DataService.updateGrade({
+                            gradeId: existingGrade.gradeId,
+                            nilai: finalScore,
+                            grade: grade,
+                            keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
                         });
                         console.log(`Final grade updated for ${studentName} on exam ${examCode}. New score: ${finalScore}`);
                     }
@@ -2131,24 +2673,11 @@
             },
 
             // =================================================================
-            // Grade Management (Google Sheets Integration)
+            // Grade Management (DataService - IndexedDB → Google Sheets)
             // =================================================================
             async viewGrade(gradeId) {
-                const cacheKey = AppState.cache.generateKey('grades', AppState.filters.grades || {});
-                const cachedGrades = AppState.cache.get(cacheKey);
-                
-                let grade = null;
-                if (cachedGrades) {
-                    grade = cachedGrades.find(g => g.gradeId === gradeId);
-                }
-                
-                if (!grade) {
-                    // Fetch from server if not in cache
-                    const result = await callGoogleScript('GET', { action: 'getGrades' });
-                    if (result.status === 'success') {
-                        grade = result.data.find(g => g.gradeId === gradeId);
-                    }
-                }
+                const grades = await DataService.getGrades();
+                const grade = grades.find(g => g.gradeId === gradeId);
                 
                 if (!grade) {
                     UI.showNotification('Data nilai tidak ditemukan.', 'error');
@@ -2175,20 +2704,8 @@
             },
 
             async editGrade(gradeId) {
-                const cacheKey = AppState.cache.generateKey('grades', AppState.filters.grades || {});
-                const cachedGrades = AppState.cache.get(cacheKey);
-                
-                let grade = null;
-                if (cachedGrades) {
-                    grade = cachedGrades.find(g => g.gradeId === gradeId);
-                }
-                
-                if (!grade) {
-                    const result = await callGoogleScript('GET', { action: 'getGrades' });
-                    if (result.status === 'success') {
-                        grade = result.data.find(g => g.gradeId === gradeId);
-                    }
-                }
+                const grades = await DataService.getGrades();
+                const grade = grades.find(g => g.gradeId === gradeId);
                 
                 if (!grade) {
                     UI.showNotification('Data nilai tidak ditemukan.', 'error');
@@ -2217,16 +2734,13 @@
                     const newKeterangan = newNilai >= 70 ? 'Lulus' : 'Tidak Lulus';
 
                     try {
-                        await callGoogleScript('POST', {
-                            action: 'updateGrade',
-                            data: {
-                                gradeId: gradeId,
-                                nilai: newNilai,
-                                grade: newGrade,
-                                keterangan: newKeterangan
-                            }
+                        await DataService.updateGrade({
+                            gradeId: gradeId,
+                            nilai: newNilai,
+                            grade: newGrade,
+                            keterangan: newKeterangan
                         });
-                        AppState.cache.clear(); // Clear cache
+                        AppState.cache.clear();
                         UI.hideModal();
                         UI.showNotification('Nilai akhir berhasil diperbarui!', 'success');
                         document.getElementById('applyGradeFilterBtn').click();
@@ -2239,8 +2753,8 @@
             deleteGrade(gradeId) {
                 UI.showConfirmModal('Konfirmasi Hapus', 'Apakah Anda yakin ingin menghapus data nilai ini?', async () => {
                     try {
-                        await callGoogleScript('POST', { action: 'deleteGrade', data: { gradeId: gradeId } });
-                        AppState.cache.clear(); // Clear cache
+                        await DataService.deleteGrade(gradeId);
+                        AppState.cache.clear();
                         UI.showNotification('Data nilai berhasil dihapus!', 'success');
                         document.getElementById('applyGradeFilterBtn').click();
                     } catch (error) {
@@ -2523,10 +3037,10 @@
                     async () => {
                         try {
                             const gradeIds = gradesToDelete.map(g => g.gradeId);
-                            await callGoogleScript('POST', { action: 'deleteGrades', data: { gradeIds: gradeIds } });
-                            AppState.cache.clear(); // Clear cache
+                            await DataService.deleteGrades(gradeIds);
+                            AppState.cache.clear();
                             UI.showNotification('Daftar nilai yang difilter berhasil dihapus!', 'success');
-                             document.getElementById('applyGradeFilterBtn').click(); // Refresh
+                            document.getElementById('applyGradeFilterBtn').click();
                         } catch (error) {
                             UI.showNotification('Gagal menghapus daftar nilai!', 'error');
                             console.error("Error deleting filtered grades: ", error);
@@ -3021,14 +3535,10 @@
                             return;
                         }
 
-                        // Security Check: Is student blocked in Google Sheets?
-                        const blockResult = await callGoogleScript('GET', { 
-                            action: 'checkBlockedStudent', 
-                            username: studentUsername, 
-                            examCode: examCode 
-                        });
+                        // Arsitektur baru: Cek dari IndexedDB dulu
+                        const isBlocked = await DataService.isStudentBlocked(studentUsername, examCode);
 
-                        if (blockResult.status === 'success' && blockResult.isBlocked) {
+                        if (isBlocked) {
                             errorDiv.textContent = 'Akses Anda ke soal ini diblokir. Hubungi admin untuk membuka blokir.';
                             errorDiv.classList.remove('hidden');
                             return;
@@ -3065,38 +3575,16 @@
                 content.innerHTML = `<div class="text-center p-8"><i class="fas fa-spinner fa-spin text-2xl text-blue-600"></i></div>`;
 
                 let currentDuration = 60; // Default duration in minutes
-                let cacheSource = '';
                 
                 try {
-                    // Strategy: Cache First, Network Update
-                    // Step 1: Try to load from IndexedDB cache first (instant loading)
-                    await IndexedDBHelper.init();
-                    const cachedSettings = await IndexedDBHelper.getFromStore('settings', 'examConfig');
-                    
-                    if (cachedSettings && cachedSettings.durationMinutes) {
-                        currentDuration = cachedSettings.durationMinutes;
-                        cacheSource = 'cache';
-                    }
-                    
-                    // Step 2: Fetch from network in background and update cache
-                    const settingsResult = await callGoogleScript('GET', { action: 'getSettings', key: 'examConfig' });
-                    if (settingsResult.status === 'success' && settingsResult.data && settingsResult.data.durationMinutes) {
-                        currentDuration = settingsResult.data.durationMinutes;
-                        cacheSource = 'network';
-                        
-                        // Update IndexedDB cache
-                        await IndexedDBHelper.saveToStore('settings', {
-                            key: 'examConfig',
-                            durationMinutes: currentDuration,
-                            lastUpdated: Date.now()
-                        });
+                    // Arsitektur baru: IndexedDB → Google Apps Script
+                    const settings = await DataService.getSettings('examConfig');
+                    if (settings && settings.durationMinutes) {
+                        currentDuration = settings.durationMinutes;
                     }
                 } catch (error) {
                     console.error("Could not load exam settings:", error);
-                    // If network fails but we have cache, continue silently
-                    if (cacheSource !== 'cache') {
-                        UI.showNotification('Gagal memuat pengaturan dari server. Menggunakan nilai default/cache.', 'error');
-                    }
+                    UI.showNotification('Gagal memuat pengaturan. Menggunakan nilai default.', 'error');
                 }
 
                 const currentApiKey = localStorage.getItem('geminiApiKey') || '';
@@ -3112,7 +3600,6 @@
                                     <input type="number" id="examDuration" name="examDuration" min="1" required
                                            class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                            value="${currentDuration}">
-                                    ${cacheSource === 'cache' ? '<p class="text-xs text-yellow-600 mt-1"><i class="fas fa-database mr-1"></i>Data dari cache lokal</p>' : ''}
                                 </div>
                                 <hr class="my-6 border-gray-200">
                                 <div class="mb-6">
@@ -3151,21 +3638,10 @@
                     submitButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Menyimpan...';
 
                     try {
-                        // Save duration to Google Sheets (Shared setting)
-                        await callGoogleScript('POST', {
-                            action: 'saveSettings',
-                            data: {
-                                key: 'examConfig',
-                                durationMinutes: newDuration
-                            }
-                        });
-
-                        // Update IndexedDB cache
-                        await IndexedDBHelper.init();
-                        await IndexedDBHelper.saveToStore('settings', {
+                        // Arsitektur baru: Simpan ke IndexedDB dulu, lalu sync ke server
+                        await DataService.saveSettings({
                             key: 'examConfig',
-                            durationMinutes: newDuration,
-                            lastUpdated: Date.now()
+                            durationMinutes: newDuration
                         });
 
                         // Save API Key to localStorage (Private setting per browser)
@@ -3223,85 +3699,49 @@
 
                 const tableBody = document.getElementById('blockedStudentsTableBody');
                 const unblockAllBtn = document.getElementById('unblockAllBtn');
-                let blockedList = [];
-                let fromCache = false;
                 
                 try {
-                    // Strategy: Cache First, Network Update
-                    await IndexedDBHelper.init();
+                    // Arsitektur baru: IndexedDB → Google Apps Script
+                    const blockedList = await DataService.getBlockedStudents();
                     
-                    // Step 1: Try to load from IndexedDB cache first
-                    const cachedBlocked = await IndexedDBHelper.getFromStore('blockedStudents');
-                    if (cachedBlocked && cachedBlocked.length > 0) {
-                        blockedList = cachedBlocked;
-                        fromCache = true;
-                        this.renderBlockedStudentsTable(tableBody, blockedList, unblockAllBtn, fromCache);
-                    }
-                    
-                    // Step 2: Fetch from network and update cache
-                    const result = await callGoogleScript('GET', { action: 'getBlockedStudents' });
-                    
-                    if (result.status === 'success' && result.data) {
-                        blockedList = result.data;
-                        fromCache = false;
-                        
-                        // Update IndexedDB cache
-                        await IndexedDBHelper.clearStore('blockedStudents');
-                        if (blockedList.length > 0) {
-                            await IndexedDBHelper.saveToStore('blockedStudents', blockedList);
-                        }
-                        await IndexedDBHelper.updateCacheTimestamp('blockedStudents');
-                        
-                        this.renderBlockedStudentsTable(tableBody, blockedList, unblockAllBtn, fromCache);
-                    } else if (!fromCache) {
+                    if (!blockedList || blockedList.length === 0) {
                         tableBody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-gray-500">Tidak ada siswa yang terblokir saat ini.</td></tr>';
                         if (unblockAllBtn) unblockAllBtn.classList.add('hidden');
+                        return;
                     }
+
+                    if (unblockAllBtn) {
+                        unblockAllBtn.classList.remove('hidden');
+                        unblockAllBtn.onclick = () => Management.unblockAllStudents();
+                    }
+                    
+                    tableBody.innerHTML = blockedList.map((blocked, index) => {
+                        const user = AppState.users.find(u => u.username === blocked.username);
+                        const studentName = user ? user.nama : 'N/A';
+                        const blockedAtDate = blocked.blockedAt || 'N/A';
+                        return `
+                            <tr>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${index + 1}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${blocked.username}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${studentName}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${blocked.examCode}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${blockedAtDate}</td>
+                                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                                    <button onclick="Management.unblockStudent('${blocked.blockId}')" class="bg-green-600 text-white px-3 py-1 rounded-md hover:bg-green-700 text-xs">
+                                        <i class="fas fa-unlock-alt mr-1"></i> Buka Blokir
+                                    </button>
+                                </td>
+                            </tr>
+                        `;
+                    }).join('');
                 } catch (error) {
                     console.error("Error fetching blocked students:", error);
-                    if (!fromCache) {
-                        tableBody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-red-500">Gagal memuat data siswa terblokir.</td></tr>';
-                    }
+                    tableBody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-red-500">Gagal memuat data siswa terblokir.</td></tr>';
                 }
             },
             
             renderBlockedStudentsTable(tableBody, blockedList, unblockAllBtn, fromCache) {
-                if (!blockedList || blockedList.length === 0) {
-                    tableBody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-gray-500">Tidak ada siswa yang terblokir saat ini.</td></tr>';
-                    if (unblockAllBtn) unblockAllBtn.classList.add('hidden');
-                    return;
-                }
-
-                if (unblockAllBtn) {
-                    unblockAllBtn.classList.remove('hidden');
-                    unblockAllBtn.onclick = () => Management.unblockAllStudents();
-                }
-                
-                tableBody.innerHTML = blockedList.map((blocked, index) => {
-                    const user = AppState.users.find(u => u.username === blocked.username);
-                    const studentName = user ? user.nama : 'N/A';
-                    const blockedAtDate = blocked.blockedAt || 'N/A';
-                    return `
-                        <tr>
-                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${index + 1}</td>
-                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${blocked.username}</td>
-                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${studentName}</td>
-                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${blocked.examCode}</td>
-                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${blockedAtDate}</td>
-                            <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                                <button onclick="Management.unblockStudent('${blocked.blockId}')" class="bg-green-600 text-white px-3 py-1 rounded-md hover:bg-green-700 text-xs">
-                                    <i class="fas fa-unlock-alt mr-1"></i> Buka Blokir
-                                </button>
-                            </td>
-                        </tr>
-                    `;
-                }).join('');
-                
-                if (fromCache) {
-                    const cacheNote = document.createElement('tr');
-                    cacheNote.innerHTML = `<td colspan="6" class="p-2 text-center text-xs text-yellow-600 bg-yellow-50"><i class="fas fa-database mr-1"></i>Data dari cache lokal - memuat data terbaru...</td>`;
-                    tableBody.insertBefore(cacheNote, tableBody.firstChild);
-                }
+                // Function no longer needed, merged into renderBlockedStudents
             },
 
 
@@ -3885,30 +4325,12 @@
                 if (!examCode) return false;
 
                 try {
-                    // Initialize IndexedDB
-                    await IndexedDBHelper.init();
+                    // Arsitektur baru: IndexedDB → Google Apps Script
+                    const filteredQuestions = await DataService.getQuestions(examCode);
                     
-                    // Try to load questions from cache first
-                    let filteredQuestions = null;
-                    const cachedQuestions = await IndexedDBHelper.getFromStore('questions');
-                    if (cachedQuestions && cachedQuestions.length > 0) {
-                        const matchingQuestions = cachedQuestions.filter(q => q.kode === examCode);
-                        if (matchingQuestions.length > 0) {
-                            filteredQuestions = matchingQuestions;
-                        }
-                    }
-                    
-                    // Fetch from network
-                    const result = await callGoogleScript('GET', { action: 'getQuestions', kode: examCode });
-                    if (result.status !== 'success' || result.data.length === 0) {
-                        if (!filteredQuestions || filteredQuestions.length === 0) {
-                            UI.showNotification('Kode soal tidak ditemukan!', 'error');
-                            return false;
-                        }
-                    } else {
-                        filteredQuestions = result.data;
-                        // Save to cache
-                        await IndexedDBHelper.saveToStore('questions', result.data);
+                    if (!filteredQuestions || filteredQuestions.length === 0) {
+                        UI.showNotification('Kode soal tidak ditemukan!', 'error');
+                        return false;
                     }
                     
                     const typeOrder = { 'pilihan_ganda': 1, 'isian': 2, 'uraian': 3 };
@@ -3943,25 +4365,13 @@
                     AppState.examAnswers = {};
                     AppState.violationCount = 0; // Reset violations
                     
-                    // Try to load settings from cache first
+                    // Get settings from DataService
                     try {
-                        const cachedSettings = await IndexedDBHelper.getFromStore('settings', 'examConfig');
-                        if (cachedSettings && cachedSettings.durationMinutes) {
-                            AppState.examTimeLeft = parseInt(cachedSettings.durationMinutes) * 60;
+                        const settings = await DataService.getSettings('examConfig');
+                        if (settings && settings.durationMinutes) {
+                            AppState.examTimeLeft = parseInt(settings.durationMinutes) * 60;
                         } else {
                             AppState.examTimeLeft = 3600; // Default 60 minutes
-                        }
-                        
-                        // Fetch from network in background
-                        const settingsResult = await callGoogleScript('GET', { action: 'getSettings', key: 'examConfig' });
-                        if (settingsResult.status === 'success' && settingsResult.data && settingsResult.data.durationMinutes) {
-                            AppState.examTimeLeft = parseInt(settingsResult.data.durationMinutes) * 60;
-                            // Update cache
-                            await IndexedDBHelper.saveToStore('settings', {
-                                key: 'examConfig',
-                                durationMinutes: settingsResult.data.durationMinutes,
-                                lastUpdated: Date.now()
-                            });
                         }
                     } catch (error) {
                         console.error("Error fetching exam settings, using default time.", error);
@@ -4167,31 +4577,25 @@
                         return result;
                     });
                     
-                    // Send all results to Google Sheet in one go
-                    await callGoogleScript('POST', {
-                        action: 'addResults',
-                        data: preparedResults
-                    });
+                    // Arsitektur baru: Simpan ke IndexedDB dulu, lalu sync ke server
+                    await DataService.addResults(preparedResults);
 
-                    // Save final grade summary to Google Sheets
+                    // Save final grade summary
                     const finalScore = AppState.questions.length > 0 ? Math.round(totalScore / AppState.questions.length) : 0;
                     const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     
-                    await callGoogleScript('POST', {
-                        action: 'addGrade',
-                        data: {
-                            gradeId: `${Date.now()}-${AppState.currentUser.username}-${AppState.selectedExamCode}`,
-                            kelas: AppState.currentUser.kelas,
-                            namaSiswa: AppState.currentUser.nama,
-                            kodeSoal: AppState.selectedExamCode,
-                            mataPelajaran: examDetails.mataPelajaran,
-                            semester: examDetails.semester,
-                            tahunAjaran: examDetails.tahunAjaran,
-                            nilai: finalScore,
-                            grade: grade,
-                            keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus',
-                            waktuSelesai: new Date().toLocaleString('id-ID')
-                        }
+                    await DataService.addGrade({
+                        gradeId: `${Date.now()}-${AppState.currentUser.username}-${AppState.selectedExamCode}`,
+                        kelas: AppState.currentUser.kelas,
+                        namaSiswa: AppState.currentUser.nama,
+                        kodeSoal: AppState.selectedExamCode,
+                        mataPelajaran: examDetails.mataPelajaran,
+                        semester: examDetails.semester,
+                        tahunAjaran: examDetails.tahunAjaran,
+                        nilai: finalScore,
+                        grade: grade,
+                        keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus',
+                        waktuSelesai: new Date().toLocaleString('id-ID')
                     });
 
                     Swal.fire({
@@ -4283,16 +4687,13 @@
                 document.removeEventListener('visibilitychange', this.handleVisibilityChange);
                 if (AppState.examTimer) clearInterval(AppState.examTimer);
 
-                // Record the block in Google Sheets
+                // Arsitektur baru: Simpan ke IndexedDB dulu, lalu sync ke server
                 const blockId = `${AppState.currentUser.username}_${AppState.selectedExamCode}`;
-                await callGoogleScript('POST', {
-                    action: 'blockStudent',
-                    data: {
-                        blockId: blockId,
-                        username: AppState.currentUser.username,
-                        examCode: AppState.selectedExamCode,
-                        blockedAt: new Date().toLocaleString('id-ID')
-                    }
+                await DataService.blockStudent({
+                    blockId: blockId,
+                    username: AppState.currentUser.username,
+                    examCode: AppState.selectedExamCode,
+                    blockedAt: new Date().toLocaleString('id-ID')
                 });
 
                 // Show final message and log out
@@ -4553,6 +4954,9 @@
             const usernameInput = document.getElementById('username');
             const passwordInput = document.getElementById('password');
             const loginError = document.getElementById('loginError');
+
+            // Initialize SyncManager first
+            await SyncManager.init();
 
             // Show loading state while fetching user data
             loginButton.disabled = true;
