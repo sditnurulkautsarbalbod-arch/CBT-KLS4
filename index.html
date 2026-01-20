@@ -4124,7 +4124,8 @@
                 content.innerHTML = dashboardContent;
                 
                 if (user.role === 'siswa') {
-                    document.getElementById('examCodeForm').addEventListener('click', async () => {
+                    document.getElementById('examCodeForm').addEventListener('submit', async (e) => {
+                        e.preventDefault();
                         const examCode = document.getElementById('examCode').value.trim();
                         const errorDiv = document.getElementById('examCodeError');
                         const studentUsername = AppState.currentUser.username;
