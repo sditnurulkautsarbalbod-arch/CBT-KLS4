@@ -1561,6 +1561,7 @@
                 generateKey: (prefix, filters) => `${prefix}_${JSON.stringify(filters)}`,
                 get: function(key) { return this._data[key]; },
                 set: function(key, value) { this._data[key] = value; },
+                delete: function(key) { delete this._data[key]; },
                 clear: function() { this._data = {}; }
             },
             // Users are now fetched from Google Script
