@@ -1617,21 +1617,45 @@
                 }
             } else if (method === 'POST') {
                 try {
-                    // Using 'fetch' with 'no-cors' for simple POST requests to Google Apps Script
-                    // This is a common pattern as it avoids complex CORS preflight issues.
-                    // The downside is we cannot read the response body, but we can assume success if the request doesn't throw an error.
-                    await fetch(SCRIPT_URL, {
+                    // Use fetch with redirect handling for Google Apps Script
+                    // GAS redirects to the actual response, so we need to follow redirects
+                    const response = await fetch(SCRIPT_URL, {
                         method: 'POST',
-                        mode: 'no-cors', 
-                        headers: { 'Content-Type': 'text/plain;charset=utf-8', }, // Use text/plain for no-cors
+                        headers: { 
+                            'Content-Type': 'text/plain;charset=utf-8',
+                        },
                         body: JSON.stringify(params),
                         redirect: 'follow'
                     });
-                    // With 'no-cors', we optimistically assume success.
-                    return { status: 'success', message: 'Data sent successfully.' };
+                    
+                    // Try to parse response as JSON
+                    try {
+                        const text = await response.text();
+                        // GAS sometimes returns HTML wrapper, try to extract JSON
+                        const jsonMatch = text.match(/\{[\s\S]*\}/);
+                        if (jsonMatch) {
+                            return JSON.parse(jsonMatch[0]);
+                        }
+                        return { status: 'success', message: 'Data sent successfully.' };
+                    } catch (parseError) {
+                        // If we can't parse, assume success if request didn't throw
+                        console.log('[POST] Response received but not JSON, assuming success');
+                        return { status: 'success', message: 'Data sent successfully.' };
+                    }
                 } catch (error) {
                     console.error('Error calling Google Script (POST):', error);
-                    UI.showNotification('Gagal mengirim data ke Google Sheet.', 'error');
+                    // If CORS error, try with no-cors mode as fallback
+                    if (error.message && error.message.includes('CORS')) {
+                        console.log('[POST] CORS error, trying no-cors mode...');
+                        await fetch(SCRIPT_URL, {
+                            method: 'POST',
+                            mode: 'no-cors',
+                            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                            body: JSON.stringify(params),
+                            redirect: 'follow'
+                        });
+                        return { status: 'success', message: 'Data sent (no-cors fallback).' };
+                    }
                     throw error;
                 }
             }
@@ -2798,7 +2822,6 @@
                         
                         // Close modal immediately (instant feedback)
                         UI.hideModal();
-                        UI.showNotification('Nilai berhasil diperbarui!', 'success');
                         document.getElementById('applyResultFilterBtn').click();
                         
                         // Sync to server in background (non-blocking)
@@ -2814,19 +2837,15 @@
                             console.log('[Sync] Result response:', resultResponse);
                             if (resultResponse && resultResponse.status === 'success') {
                                 console.log('[Sync] ✓ Background sync completed successfully');
-                                UI.showNotification('Data tersinkronisasi ke server!', 'success');
                             } else {
                                 console.error('[Sync] ✗ Background sync failed:', resultResponse);
-                                UI.showNotification('Sinkronisasi gagal. Coba refresh halaman.', 'warning');
                             }
                         }).catch(err => {
                             console.error('[Sync] ✗ Background sync error:', err);
-                            UI.showNotification('Error sinkronisasi: ' + err.message, 'error');
                         });
                         
                     } catch (error) {
                         console.error("Error updating grade: ", error);
-                        UI.showNotification('Gagal memperbarui nilai: ' + error.message, 'error');
                     }
                 });
             },
@@ -2835,9 +2854,6 @@
                 UI.showConfirmModal('Konfirmasi Hapus', 'Apakah Anda yakin ingin menghapus detail hasil ini?', async () => {
                     try {
                         console.log('[Delete] Deleting result with ID:', id);
-                        
-                        // Show loading indicator
-                        UI.showNotification('Menghapus data...', 'info');
                         
                         // Delete from server FIRST (synchronous delete)
                         const serverResult = await callGoogleScript('POST', { 
@@ -2858,15 +2874,12 @@
                         // Clear IndexedDB store to force fresh fetch
                         await IndexedDBHelper.clearStore('results');
                         
-                        UI.showNotification('Hasil ujian berhasil dihapus!', 'success');
-                        
                         // Refresh from server (now consistent)
                         setTimeout(() => {
                             UI.loadAndRenderPaginatedResults(true);
                         }, 100);
                     } catch (error) {
                         console.error('Delete error:', error);
-                        UI.showNotification('Gagal menghapus hasil: ' + error.message, 'error');
                     }
                 });
             },
@@ -3355,10 +3368,9 @@
                         });
                         AppState.cache.clear();
                         UI.hideModal();
-                        UI.showNotification('Nilai akhir berhasil diperbarui!', 'success');
                         document.getElementById('applyGradeFilterBtn').click();
                     } catch (error) {
-                        UI.showNotification('Gagal memperbarui nilai!', 'error');
+                        console.error('Error updating grade:', error);
                     }
                 });
             },
@@ -3367,9 +3379,6 @@
                 UI.showConfirmModal('Konfirmasi Hapus', 'Apakah Anda yakin ingin menghapus data nilai ini?', async () => {
                     try {
                         console.log('[Delete] Deleting grade with ID:', gradeId);
-                        
-                        // Show loading indicator
-                        UI.showNotification('Menghapus data...', 'info');
                         
                         // Delete from server FIRST (synchronous delete)
                         const serverResult = await callGoogleScript('POST', { 
@@ -3389,8 +3398,6 @@
                         
                         // Clear IndexedDB store to force fresh fetch
                         await IndexedDBHelper.clearStore('grades');
-                        
-                        UI.showNotification('Data nilai berhasil dihapus!', 'success');
                         
                         // Refresh from server (now consistent)
                         setTimeout(() => {
@@ -3670,9 +3677,6 @@
                     async () => {
                         const resultIds = resultsToDelete.map(r => r.resultId);
                         try {
-                            // Show loading indicator
-                            UI.showNotification('Menghapus data...', 'info');
-                            
                             // Delete from server FIRST (batch delete)
                             const serverResult = await callGoogleScript('POST', { 
                                 action: 'deleteResults', 
@@ -3694,15 +3698,12 @@
                             // Clear IndexedDB store to force fresh fetch
                             await IndexedDBHelper.clearStore('results');
                             
-                            UI.showNotification('Hasil ujian yang difilter berhasil dihapus!', 'success');
-                            
                             // Refresh from server (now consistent)
                             setTimeout(() => {
                                 UI.loadAndRenderPaginatedResults(true);
                             }, 100);
                         } catch (error) {
                             console.error('Bulk delete error:', error);
-                            UI.showNotification('Gagal menghapus hasil ujian: ' + error.message, 'error');
                         }
                     }
                 );
@@ -3731,9 +3732,6 @@
                         try {
                             const gradeIds = gradesToDelete.map(g => g.gradeId);
                             
-                            // Show loading indicator
-                            UI.showNotification('Menghapus data...', 'info');
-                            
                             // Delete from server FIRST (batch delete)
                             const serverResult = await callGoogleScript('POST', { 
                                 action: 'deleteGrades', 
@@ -3755,15 +3753,12 @@
                             // Clear IndexedDB store to force fresh fetch
                             await IndexedDBHelper.clearStore('grades');
                             
-                            UI.showNotification('Daftar nilai yang difilter berhasil dihapus!', 'success');
-                            
                             // Refresh from server (now consistent)
                             setTimeout(() => {
                                 UI.loadAndRenderPaginatedGrades(true);
                             }, 100);
                         } catch (error) {
                             console.error('Bulk delete error:', error);
-                            UI.showNotification('Gagal menghapus daftar nilai: ' + error.message, 'error');
                         }
                     }
                 );
@@ -4767,6 +4762,7 @@
                         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
                             <h2 class="text-2xl font-bold text-gray-900">Daftar Nilai</h2>
                             <div class="flex flex-wrap items-center justify-start sm:justify-end gap-2 w-full sm:w-auto">
+                                <button onclick="UI.refreshGradesFromServer()" class="bg-cyan-600 text-white px-4 py-2 rounded-lg hover:bg-cyan-700 transition duration-200" title="Sinkronkan data dengan Google Sheet"><i class="fas fa-sync-alt mr-2"></i>Refresh</button>
                                 <button onclick="Management.deleteFilteredGrades()" class="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition duration-200"><i class="fas fa-trash-alt mr-2"></i>Hapus</button>
                                 <button onclick="Management.downloadGradesPDF()" class="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition duration-200"><i class="fas fa-download mr-2"></i>Download PDF</button>
                             </div>
@@ -5006,16 +5002,53 @@
                 
                 document.getElementById('applyStudentGradeFilterBtn').addEventListener('click', async () => {
                     const studentGradesTableBody = document.getElementById('studentGradesTableBody');
-                    studentGradesTableBody.innerHTML = '<tr><td colspan="7" class="px-6 py-4 text-center text-gray-500"><i class="fas fa-spinner fa-spin mr-2"></i>Memuat data...</td></tr>';
+                    studentGradesTableBody.innerHTML = '<tr><td colspan="7" class="px-6 py-4 text-center text-gray-500"><i class="fas fa-spinner fa-spin mr-2"></i>Memuat data dari server...</td></tr>';
 
                     const tahunAjaran = document.getElementById('filterStudentGradeTahunAjaran').value;
                     const semester = document.getElementById('filterStudentGradeSemester').value;
                     const mataPelajaran = document.getElementById('filterStudentGradeSubject').value;
                     
                     try {
-                        // Try cache first
-                        const cachedGrades = await IndexedDBHelper.getFromStore('grades');
-                        if (cachedGrades && cachedGrades.length > 0) {
+                        // SERVER-FIRST: Always fetch from Google Sheets for accurate data
+                        if (SyncManager.isOnline) {
+                            const result = await callGoogleScript('GET', {
+                                action: 'getGrades',
+                                namaSiswa: AppState.currentUser.nama,
+                                tahunAjaran: tahunAjaran,
+                                semester: semester,
+                                mataPelajaran: mataPelajaran
+                            });
+
+                            if (result.status === 'success') {
+                                this.renderStudentGradesTable(result.data || []);
+                                // Update cache for offline use
+                                if (result.data && result.data.length > 0) {
+                                    for (const item of result.data) {
+                                        await IndexedDBHelper.saveToStore('grades', item);
+                                    }
+                                }
+                            } else {
+                                throw new Error('Gagal memuat data nilai dari server');
+                            }
+                        } else {
+                            // OFFLINE FALLBACK
+                            const cachedGrades = await IndexedDBHelper.getFromStore('grades') || [];
+                            const filteredGrades = cachedGrades.filter(g => {
+                                if (g.namaSiswa !== AppState.currentUser.nama) return false;
+                                if (tahunAjaran && g.tahunAjaran !== tahunAjaran) return false;
+                                if (semester && g.semester !== semester) return false;
+                                if (mataPelajaran && g.mataPelajaran !== mataPelajaran) return false;
+                                return true;
+                            });
+                            this.renderStudentGradesTable(filteredGrades);
+                            UI.showNotification('Mode offline - menampilkan data tersimpan', 'info');
+                        }
+                    } catch (error) {
+                        console.error("Error fetching student grades:", error);
+                        
+                        // Try cache as fallback
+                        try {
+                            const cachedGrades = await IndexedDBHelper.getFromStore('grades') || [];
                             const filteredGrades = cachedGrades.filter(g => {
                                 if (g.namaSiswa !== AppState.currentUser.nama) return false;
                                 if (tahunAjaran && g.tahunAjaran !== tahunAjaran) return false;
@@ -5025,30 +5058,14 @@
                             });
                             if (filteredGrades.length > 0) {
                                 this.renderStudentGradesTable(filteredGrades);
+                                UI.showNotification('Gagal memuat dari server - menampilkan data tersimpan', 'warning');
+                                return;
                             }
+                        } catch (cacheError) {
+                            console.error('Cache fallback failed:', cacheError);
                         }
                         
-                        // Fetch from network
-                        const result = await callGoogleScript('GET', {
-                            action: 'getGrades',
-                            namaSiswa: AppState.currentUser.nama,
-                            tahunAjaran: tahunAjaran,
-                            semester: semester,
-                            mataPelajaran: mataPelajaran
-                        });
-
-                        if (result.status === 'success') {
-                            this.renderStudentGradesTable(result.data);
-                            // Update cache
-                            if (result.data && result.data.length > 0) {
-                                await IndexedDBHelper.saveToStore('grades', result.data);
-                            }
-                        } else {
-                            throw new Error('Gagal memuat data nilai');
-                        }
-                    } catch (error) {
-                        console.error("Error fetching student grades:", error);
-                        studentGradesTableBody.innerHTML = '<tr><td colspan="7" class="px-6 py-4 text-center text-red-500"><i class="fas fa-exclamation-triangle mr-2"></i>Gagal memuat data.</td></tr>';
+                        studentGradesTableBody.innerHTML = '<tr><td colspan="7" class="px-6 py-4 text-center text-red-500"><i class="fas fa-exclamation-triangle mr-2"></i>Gagal memuat data. Periksa koneksi.</td></tr>';
                     }
                 });
                 document.getElementById('applyStudentGradeFilterBtn').click();
@@ -5724,7 +5741,7 @@
 
             async loadAndRenderPaginatedGrades(forceRefresh = false) {
                 const gradesTableBody = document.getElementById('gradesTableBody');
-                gradesTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-gray-500"><i class="fas fa-spinner fa-spin mr-2"></i>Memuat data nilai...</td></tr>';
+                gradesTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-gray-500"><i class="fas fa-spinner fa-spin mr-2"></i>Memuat data nilai dari server...</td></tr>';
 
                 const filters = {
                     tahunAjaran: document.getElementById('filterGradeTahunAjaran').value,
@@ -5738,73 +5755,116 @@
 
                 const cacheKey = AppState.cache.generateKey('grades', filters);
                 
-                // Clear cache if force refresh
-                if (forceRefresh) {
-                    AppState.cache.delete(cacheKey);
+                // Always clear cache to ensure fresh data
+                AppState.cache.delete(cacheKey);
+                
+                let allGrades = [];
+
+                try {
+                    // SERVER-FIRST: Always fetch from Google Sheets first for accurate data
+                    if (SyncManager.isOnline) {
+                        console.log('[Grades] Fetching fresh data from server...');
+                        const result = await callGoogleScript('GET', {
+                            action: 'getGrades',
+                            ...filters
+                        });
+
+                        if (result.status === 'success') {
+                            // Clear old IndexedDB data and save fresh data
+                            await IndexedDBHelper.clearStore('grades');
+                            
+                            allGrades = result.data || [];
+                            // Save to IndexedDB for offline fallback
+                            for (const item of allGrades) {
+                                await IndexedDBHelper.saveToStore('grades', item);
+                            }
+                            console.log(`[Grades] Loaded ${allGrades.length} grades from server`);
+                        } else {
+                            throw new Error(result.message || 'Gagal memuat data nilai dari server');
+                        }
+                    } else {
+                        // OFFLINE FALLBACK: Read from IndexedDB only when offline
+                        console.log('[Grades] Offline mode - loading from IndexedDB...');
+                        allGrades = await IndexedDBHelper.getFromStore('grades') || [];
+                        UI.showNotification('Mode offline - menampilkan data tersimpan', 'info');
+                    }
+                    
+                    // Apply filters locally (in case server returned all data)
+                    let filteredGrades = allGrades.filter(g => {
+                        if (filters.tahunAjaran && g.tahunAjaran !== filters.tahunAjaran) return false;
+                        if (filters.semester && g.semester !== filters.semester) return false;
+                        if (filters.kodeSoal && g.kodeSoal !== filters.kodeSoal) return false;
+                        if (filters.mataPelajaran && g.mataPelajaran !== filters.mataPelajaran) return false;
+                        if (filters.kelas && g.kelas !== filters.kelas) return false;
+                        if (filters.namaSiswa && g.namaSiswa !== filters.namaSiswa) return false;
+                        return true;
+                    });
+                    
+                    filteredGrades.sort((a, b) => a.namaSiswa.localeCompare(b.namaSiswa));
+                    AppState.cache.set(cacheKey, filteredGrades);
+
+                    AppState.pagination.grades.totalItems = filteredGrades.length;
+                    const start = (AppState.pagination.grades.currentPage - 1) * AppState.itemsPerPage;
+                    const end = start + AppState.itemsPerPage;
+                    const paginatedItems = filteredGrades.slice(start, end);
+
+                    Management.renderFilteredGrades(paginatedItems);
+
+                    UI.renderPaginationControls('gradesPagination', AppState.pagination.grades, (newPage) => {
+                        AppState.pagination.grades.currentPage = newPage;
+                        this.loadAndRenderPaginatedGrades();
+                    });
+                } catch (error) {
+                    console.error("Error fetching grades:", error);
+                    
+                    // Try IndexedDB as last resort fallback
+                    try {
+                        allGrades = await IndexedDBHelper.getFromStore('grades') || [];
+                        if (allGrades.length > 0) {
+                            UI.showNotification('Gagal memuat dari server - menampilkan data tersimpan', 'warning');
+                            
+                            let filteredGrades = allGrades.filter(g => {
+                                if (filters.tahunAjaran && g.tahunAjaran !== filters.tahunAjaran) return false;
+                                if (filters.semester && g.semester !== filters.semester) return false;
+                                if (filters.kodeSoal && g.kodeSoal !== filters.kodeSoal) return false;
+                                if (filters.mataPelajaran && g.mataPelajaran !== filters.mataPelajaran) return false;
+                                if (filters.kelas && g.kelas !== filters.kelas) return false;
+                                if (filters.namaSiswa && g.namaSiswa !== filters.namaSiswa) return false;
+                                return true;
+                            });
+                            
+                            filteredGrades.sort((a, b) => a.namaSiswa.localeCompare(b.namaSiswa));
+                            Management.renderFilteredGrades(filteredGrades);
+                            return;
+                        }
+                    } catch (idbError) {
+                        console.error("IndexedDB fallback failed:", idbError);
+                    }
+                    
+                    gradesTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-red-500"><i class="fas fa-exclamation-triangle mr-2"></i>Gagal memuat data. Periksa koneksi dan coba lagi.</td></tr>';
+                }
+            },
+
+            // Fungsi untuk refresh data grades dari server secara manual
+            async refreshGradesFromServer() {
+                if (!SyncManager.isOnline) {
+                    UI.showNotification('Tidak dapat menyinkronkan - Anda sedang offline.', 'error');
+                    return;
                 }
                 
-                let cachedData = AppState.cache.get(cacheKey);
-
-                if (!cachedData) {
-                    try {
-                        // OFFLINE-FIRST: Read from IndexedDB first
-                        let allGrades = await IndexedDBHelper.getFromStore('grades');
-                        
-                        // If no data in IndexedDB OR force refresh, fetch from server
-                        if (!allGrades || allGrades.length === 0 || forceRefresh) {
-                            const result = await callGoogleScript('GET', {
-                                action: 'getGrades',
-                                ...filters
-                            });
-
-                            if (result.status === 'success') {
-                                // Clear old data from IndexedDB before saving new
-                                if (forceRefresh) {
-                                    await IndexedDBHelper.clearStore('grades');
-                                }
-                                
-                                allGrades = result.data;
-                                // Save to IndexedDB for future use
-                                for (const item of allGrades) {
-                                    await IndexedDBHelper.saveToStore('grades', item);
-                                }
-                            } else {
-                                throw new Error(result.message || 'Gagal memuat data nilai');
-                            }
-                        }
-                        
-                        // Apply filters locally
-                        let filteredGrades = allGrades.filter(g => {
-                            if (filters.tahunAjaran && g.tahunAjaran !== filters.tahunAjaran) return false;
-                            if (filters.semester && g.semester !== filters.semester) return false;
-                            if (filters.kodeSoal && g.kodeSoal !== filters.kodeSoal) return false;
-                            if (filters.mataPelajaran && g.mataPelajaran !== filters.mataPelajaran) return false;
-                            if (filters.kelas && g.kelas !== filters.kelas) return false;
-                            if (filters.namaSiswa && g.namaSiswa !== filters.namaSiswa) return false;
-                            return true;
-                        });
-                        
-                        filteredGrades.sort((a, b) => a.namaSiswa.localeCompare(b.namaSiswa));
-                        AppState.cache.set(cacheKey, filteredGrades);
-                        cachedData = filteredGrades;
-                    } catch (error) {
-                        console.error("Error fetching grades:", error);
-                        gradesTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-red-500"><i class="fas fa-exclamation-triangle mr-2"></i>Gagal memuat data. Periksa koneksi.</td></tr>';
-                        return;
-                    }
-                }
-
-                AppState.pagination.grades.totalItems = cachedData.length;
-                const start = (AppState.pagination.grades.currentPage - 1) * AppState.itemsPerPage;
-                const end = start + AppState.itemsPerPage;
-                const paginatedItems = cachedData.slice(start, end);
-
-                Management.renderFilteredGrades(paginatedItems);
-
-                UI.renderPaginationControls('gradesPagination', AppState.pagination.grades, (newPage) => {
-                    AppState.pagination.grades.currentPage = newPage;
-                    this.loadAndRenderPaginatedGrades();
-                });
+                // Clear all grades cache
+                AppState.cache.clear();
+                await IndexedDBHelper.clearStore('grades');
+                
+                UI.showNotification('Menyinkronkan data dengan Google Sheet...', 'info');
+                
+                // Reset pagination
+                AppState.pagination.grades.currentPage = 1;
+                
+                // Reload with fresh data
+                await this.loadAndRenderPaginatedGrades();
+                
+                UI.showNotification('Data berhasil disinkronkan dari Google Sheet!', 'success');
             }
 
         };
