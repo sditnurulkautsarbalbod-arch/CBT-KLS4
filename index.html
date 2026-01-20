@@ -755,8 +755,16 @@
                     const transaction = this.db.transaction([storeName], 'readwrite');
                     const store = transaction.objectStore(storeName);
                     const request = store.delete(key);
-                    request.onsuccess = () => resolve();
-                    request.onerror = () => reject(request.error);
+                    
+                    // Wait for transaction to complete, not just the request
+                    transaction.oncomplete = () => {
+                        console.log(`[IndexedDB] Deleted from ${storeName} with key: ${key}`);
+                        resolve();
+                    };
+                    transaction.onerror = () => {
+                        console.error(`[IndexedDB] Delete error in ${storeName}:`, transaction.error);
+                        reject(transaction.error);
+                    };
                 });
             },
 
@@ -2776,13 +2784,23 @@
             deleteResult(id) {
                 UI.showConfirmModal('Konfirmasi Hapus', 'Apakah Anda yakin ingin menghapus detail hasil ini?', async () => {
                     try {
+                        console.log('[Delete] Deleting result with ID:', id);
+                        
                         // Instant delete from IndexedDB + background sync
                         await IndexedDBHelper.deleteFromStore('results', id);
                         await SyncManager.addToQueue('deleteResult', 'results', { resultId: id });
-                        AppState.cache.clear(); // Clear cache to reflect changes
+                        
+                        // Clear ALL caches to ensure fresh data
+                        AppState.cache.clear();
+                        
                         UI.showNotification('Hasil ujian berhasil dihapus!', 'success');
-                        document.getElementById('applyResultFilterBtn').click(); // Refresh view
+                        
+                        // Reload data - read fresh from IndexedDB
+                        setTimeout(() => {
+                            UI.loadAndRenderPaginatedResults(false); // Read from updated IndexedDB
+                        }, 150);
                     } catch (error) {
+                        console.error('Delete error:', error);
                         UI.showNotification('Gagal menghapus hasil!', 'error');
                     }
                 });
@@ -3152,12 +3170,22 @@
             deleteGrade(gradeId) {
                 UI.showConfirmModal('Konfirmasi Hapus', 'Apakah Anda yakin ingin menghapus data nilai ini?', async () => {
                     try {
+                        console.log('[Delete] Deleting grade with ID:', gradeId);
+                        
                         await DataService.deleteGrade(gradeId);
+                        
+                        // Clear ALL caches to ensure fresh data
                         AppState.cache.clear();
+                        
                         UI.showNotification('Data nilai berhasil dihapus!', 'success');
-                        document.getElementById('applyGradeFilterBtn').click();
+                        
+                        // Reload data - read fresh from IndexedDB
+                        setTimeout(() => {
+                            UI.loadAndRenderPaginatedGrades(false); // Read from updated IndexedDB
+                        }, 150);
                     } catch (error) {
-                        UI.showNotification('Gagal menghapus data nilai!', 'error');
+                        console.error('Delete error:', error);
+                        UI.showNotification('Gagal menghapus nilai!', 'error');
                     }
                 });
             },
@@ -3411,10 +3439,18 @@
                                 await IndexedDBHelper.deleteFromStore('results', id);
                                 await SyncManager.addToQueue('deleteResult', 'results', { resultId: id });
                             }
-                            AppState.cache.clear(); // Clear cache
+                            
+                            // Clear ALL caches
+                            AppState.cache.clear();
+                            
                             UI.showNotification('Hasil ujian yang difilter berhasil dihapus!', 'success');
-                            document.getElementById('applyResultFilterBtn').click(); // Refresh
+                            
+                            // Reload data - read fresh from IndexedDB
+                            setTimeout(() => {
+                                UI.loadAndRenderPaginatedResults(false);
+                            }, 150);
                         } catch (error) {
+                            console.error('Bulk delete error:', error);
                             UI.showNotification('Gagal menghapus hasil ujian!', 'error');
                         }
                     }
@@ -3444,12 +3480,19 @@
                         try {
                             const gradeIds = gradesToDelete.map(g => g.gradeId);
                             await DataService.deleteGrades(gradeIds);
+                            
+                            // Clear ALL caches
                             AppState.cache.clear();
+                            
                             UI.showNotification('Daftar nilai yang difilter berhasil dihapus!', 'success');
-                            document.getElementById('applyGradeFilterBtn').click();
+                            
+                            // Reload data - read fresh from IndexedDB
+                            setTimeout(() => {
+                                UI.loadAndRenderPaginatedGrades(false);
+                            }, 150);
                         } catch (error) {
+                            console.error('Bulk delete error:', error);
                             UI.showNotification('Gagal menghapus daftar nilai!', 'error');
-                            console.error("Error deleting filtered grades: ", error);
                         }
                     }
                 );
@@ -5315,7 +5358,7 @@
                 });
             },
             
-            async loadAndRenderPaginatedResults() {
+            async loadAndRenderPaginatedResults(forceRefresh = false) {
                 const resultsTableBody = document.getElementById('resultsTableBody');
                 resultsTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-gray-500"><i class="fas fa-spinner fa-spin mr-2"></i>Memuat data...</td></tr>';
                 
@@ -5330,6 +5373,12 @@
                 };
 
                 const cacheKey = AppState.cache.generateKey('results', filters);
+                
+                // Clear cache if force refresh
+                if (forceRefresh) {
+                    AppState.cache.delete(cacheKey);
+                }
+                
                 let cachedData = AppState.cache.get(cacheKey);
 
                 if (!cachedData) {
@@ -5337,10 +5386,15 @@
                         // OFFLINE-FIRST: Read from IndexedDB first
                         let allResults = await IndexedDBHelper.getFromStore('results');
                         
-                        // If no data in IndexedDB, fetch from server
-                        if (!allResults || allResults.length === 0) {
+                        // If no data in IndexedDB OR force refresh, fetch from server
+                        if (!allResults || allResults.length === 0 || forceRefresh) {
                             const result = await callGoogleScript('GET', filters);
                             if (result.status === 'success') {
+                                // Clear old data from IndexedDB before saving new
+                                if (forceRefresh) {
+                                    await IndexedDBHelper.clearStore('results');
+                                }
+                                
                                 allResults = result.data;
                                 // Save to IndexedDB for future use
                                 for (const item of allResults) {
@@ -5384,7 +5438,7 @@
                 });
             },
 
-            async loadAndRenderPaginatedGrades() {
+            async loadAndRenderPaginatedGrades(forceRefresh = false) {
                 const gradesTableBody = document.getElementById('gradesTableBody');
                 gradesTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-gray-500"><i class="fas fa-spinner fa-spin mr-2"></i>Memuat data nilai...</td></tr>';
 
@@ -5399,6 +5453,12 @@
                 AppState.filters.grades = filters; // Store filters for view/edit
 
                 const cacheKey = AppState.cache.generateKey('grades', filters);
+                
+                // Clear cache if force refresh
+                if (forceRefresh) {
+                    AppState.cache.delete(cacheKey);
+                }
+                
                 let cachedData = AppState.cache.get(cacheKey);
 
                 if (!cachedData) {
@@ -5406,14 +5466,19 @@
                         // OFFLINE-FIRST: Read from IndexedDB first
                         let allGrades = await IndexedDBHelper.getFromStore('grades');
                         
-                        // If no data in IndexedDB, fetch from server
-                        if (!allGrades || allGrades.length === 0) {
+                        // If no data in IndexedDB OR force refresh, fetch from server
+                        if (!allGrades || allGrades.length === 0 || forceRefresh) {
                             const result = await callGoogleScript('GET', {
                                 action: 'getGrades',
                                 ...filters
                             });
 
                             if (result.status === 'success') {
+                                // Clear old data from IndexedDB before saving new
+                                if (forceRefresh) {
+                                    await IndexedDBHelper.clearStore('grades');
+                                }
+                                
                                 allGrades = result.data;
                                 // Save to IndexedDB for future use
                                 for (const item of allGrades) {
