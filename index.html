@@ -2786,22 +2786,37 @@
                     try {
                         console.log('[Delete] Deleting result with ID:', id);
                         
-                        // Instant delete from IndexedDB + background sync
-                        await IndexedDBHelper.deleteFromStore('results', id);
-                        await SyncManager.addToQueue('deleteResult', 'results', { resultId: id });
+                        // Show loading indicator
+                        UI.showNotification('Menghapus data...', 'info');
                         
-                        // Clear ALL caches to ensure fresh data
+                        // Delete from server FIRST (synchronous delete)
+                        const serverResult = await callGoogleScript('POST', { 
+                            action: 'deleteResult', 
+                            data: { resultId: id } 
+                        });
+                        
+                        if (serverResult.status !== 'success') {
+                            throw new Error(serverResult.message || 'Gagal menghapus dari server');
+                        }
+                        
+                        // Then delete from IndexedDB
+                        await IndexedDBHelper.deleteFromStore('results', id);
+                        
+                        // Clear ALL caches
                         AppState.cache.clear();
+                        
+                        // Clear IndexedDB store to force fresh fetch
+                        await IndexedDBHelper.clearStore('results');
                         
                         UI.showNotification('Hasil ujian berhasil dihapus!', 'success');
                         
-                        // Reload data - read fresh from IndexedDB
+                        // Refresh from server (now consistent)
                         setTimeout(() => {
-                            UI.loadAndRenderPaginatedResults(false); // Read from updated IndexedDB
-                        }, 150);
+                            UI.loadAndRenderPaginatedResults(true);
+                        }, 100);
                     } catch (error) {
                         console.error('Delete error:', error);
-                        UI.showNotification('Gagal menghapus hasil!', 'error');
+                        UI.showNotification('Gagal menghapus hasil: ' + error.message, 'error');
                     }
                 });
             },
@@ -3172,20 +3187,37 @@
                     try {
                         console.log('[Delete] Deleting grade with ID:', gradeId);
                         
-                        await DataService.deleteGrade(gradeId);
+                        // Show loading indicator
+                        UI.showNotification('Menghapus data...', 'info');
                         
-                        // Clear ALL caches to ensure fresh data
+                        // Delete from server FIRST (synchronous delete)
+                        const serverResult = await callGoogleScript('POST', { 
+                            action: 'deleteGrade', 
+                            data: { gradeId: gradeId } 
+                        });
+                        
+                        if (serverResult.status !== 'success') {
+                            throw new Error(serverResult.message || 'Gagal menghapus dari server');
+                        }
+                        
+                        // Then delete from IndexedDB
+                        await IndexedDBHelper.deleteFromStore('grades', gradeId);
+                        
+                        // Clear ALL caches
                         AppState.cache.clear();
+                        
+                        // Clear IndexedDB store to force fresh fetch
+                        await IndexedDBHelper.clearStore('grades');
                         
                         UI.showNotification('Data nilai berhasil dihapus!', 'success');
                         
-                        // Reload data - read fresh from IndexedDB
+                        // Refresh from server (now consistent)
                         setTimeout(() => {
-                            UI.loadAndRenderPaginatedGrades(false); // Read from updated IndexedDB
-                        }, 150);
+                            UI.loadAndRenderPaginatedGrades(true);
+                        }, 100);
                     } catch (error) {
                         console.error('Delete error:', error);
-                        UI.showNotification('Gagal menghapus nilai!', 'error');
+                        UI.showNotification('Gagal menghapus nilai: ' + error.message, 'error');
                     }
                 });
             },
@@ -3434,24 +3466,39 @@
                     async () => {
                         const resultIds = resultsToDelete.map(r => r.resultId);
                         try {
-                            // Instant delete from IndexedDB + background sync
+                            // Show loading indicator
+                            UI.showNotification('Menghapus data...', 'info');
+                            
+                            // Delete from server FIRST (batch delete)
+                            const serverResult = await callGoogleScript('POST', { 
+                                action: 'deleteResults', 
+                                data: { resultIds: resultIds } 
+                            });
+                            
+                            if (serverResult.status !== 'success') {
+                                throw new Error(serverResult.message || 'Gagal menghapus dari server');
+                            }
+                            
+                            // Then delete from IndexedDB
                             for (const id of resultIds) {
                                 await IndexedDBHelper.deleteFromStore('results', id);
-                                await SyncManager.addToQueue('deleteResult', 'results', { resultId: id });
                             }
                             
                             // Clear ALL caches
                             AppState.cache.clear();
                             
+                            // Clear IndexedDB store to force fresh fetch
+                            await IndexedDBHelper.clearStore('results');
+                            
                             UI.showNotification('Hasil ujian yang difilter berhasil dihapus!', 'success');
                             
-                            // Reload data - read fresh from IndexedDB
+                            // Refresh from server (now consistent)
                             setTimeout(() => {
-                                UI.loadAndRenderPaginatedResults(false);
-                            }, 150);
+                                UI.loadAndRenderPaginatedResults(true);
+                            }, 100);
                         } catch (error) {
                             console.error('Bulk delete error:', error);
-                            UI.showNotification('Gagal menghapus hasil ujian!', 'error');
+                            UI.showNotification('Gagal menghapus hasil ujian: ' + error.message, 'error');
                         }
                     }
                 );
@@ -3479,20 +3526,40 @@
                     async () => {
                         try {
                             const gradeIds = gradesToDelete.map(g => g.gradeId);
-                            await DataService.deleteGrades(gradeIds);
+                            
+                            // Show loading indicator
+                            UI.showNotification('Menghapus data...', 'info');
+                            
+                            // Delete from server FIRST (batch delete)
+                            const serverResult = await callGoogleScript('POST', { 
+                                action: 'deleteGrades', 
+                                data: { gradeIds: gradeIds } 
+                            });
+                            
+                            if (serverResult.status !== 'success') {
+                                throw new Error(serverResult.message || 'Gagal menghapus dari server');
+                            }
+                            
+                            // Then delete from IndexedDB
+                            for (const id of gradeIds) {
+                                await IndexedDBHelper.deleteFromStore('grades', id);
+                            }
                             
                             // Clear ALL caches
                             AppState.cache.clear();
                             
+                            // Clear IndexedDB store to force fresh fetch
+                            await IndexedDBHelper.clearStore('grades');
+                            
                             UI.showNotification('Daftar nilai yang difilter berhasil dihapus!', 'success');
                             
-                            // Reload data - read fresh from IndexedDB
+                            // Refresh from server (now consistent)
                             setTimeout(() => {
-                                UI.loadAndRenderPaginatedGrades(false);
-                            }, 150);
+                                UI.loadAndRenderPaginatedGrades(true);
+                            }, 100);
                         } catch (error) {
                             console.error('Bulk delete error:', error);
-                            UI.showNotification('Gagal menghapus daftar nilai!', 'error');
+                            UI.showNotification('Gagal menghapus daftar nilai: ' + error.message, 'error');
                         }
                     }
                 );
