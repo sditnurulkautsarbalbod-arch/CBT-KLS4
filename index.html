@@ -2453,39 +2453,41 @@
                 });
             },
 
-            async deleteQuestion(id) {
-                try {
-                    console.log('[Delete] Deleting question with ID:', id);
-                    
-                    // Delete from server FIRST (synchronous delete)
-                    const serverResult = await callGoogleScript('POST', { 
-                        action: 'deleteQuestion', 
-                        data: { id: id } 
-                    });
-                    
-                    if (serverResult.status !== 'success') {
-                        throw new Error(serverResult.message || 'Gagal menghapus dari server');
+            deleteQuestion(id) {
+                UI.showConfirmModal('Konfirmasi Hapus', 'Apakah Anda yakin ingin menghapus soal ini?', async () => {
+                    try {
+                        console.log('[Delete] Deleting question with ID:', id);
+                        
+                        // IMMEDIATE: Delete from IndexedDB first for instant UI update
+                        await IndexedDBHelper.deleteFromStore('questions', id);
+                        
+                        // Clear cache to ensure UI reflects deletion
+                        AppState.cache.clear();
+                        
+                        // IMMEDIATE: Refresh UI (don't wait for server)
+                        UI.loadAndRenderPaginatedQuestions(false);
+                        
+                        // BACKGROUND: Sync with Google Sheets (fire and forget)
+                        callGoogleScript('POST', { 
+                            action: 'deleteQuestion', 
+                            data: { id: id } 
+                        }).then(serverResult => {
+                            if (serverResult.status === 'success') {
+                                console.log('[Delete] Server sync completed for question:', id);
+                            } else {
+                                console.error('[Delete] Server sync failed:', serverResult.message);
+                                // Optionally show warning that server sync failed
+                                UI.showNotification('Peringatan: Sinkronisasi server tertunda', 'warning');
+                            }
+                        }).catch(error => {
+                            console.error('[Delete] Background server sync error:', error);
+                        });
+                        
+                    } catch (error) {
+                        console.error("Error removing document: ", error);
+                        UI.showNotification('Gagal menghapus soal: ' + error.message, 'error');
                     }
-                    
-                    // Then delete from IndexedDB
-                    await IndexedDBHelper.deleteFromStore('questions', id);
-                    
-                    // Clear ALL caches
-                    AppState.cache.clear();
-                    
-                    // Clear IndexedDB store to force fresh fetch
-                    await IndexedDBHelper.clearStore('questions');
-                    
-                    UI.showNotification('Soal berhasil dihapus!', 'success');
-                    
-                    // Refresh from server (now consistent)
-                    setTimeout(() => {
-                        UI.loadAndRenderPaginatedQuestions(true);
-                    }, 100);
-                } catch (error) {
-                    console.error("Error removing document: ", error);
-                    UI.showNotification('Gagal menghapus soal: ' + error.message, 'error');
-                }
+                });
             },
 
             renderFilteredQuestions(questions) {
