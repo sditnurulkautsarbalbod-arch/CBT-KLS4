@@ -1594,7 +1594,7 @@
         // =================================================================
         // GOOGLE SCRIPT HELPER
         // =================================================================
-        const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyx5oWrP4tTcCsoXzpTTT4nuvxpMo7NfvOXbgMO1zMwqPqPjFHDTWYzM5KYGCf8FC7xVw/exec';
+        const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwZmG_ofWF2kQwrm9b_-yw1ZA4hXEum9pCG7qfIBs2jjjutWx2wzRww2o-Us6HG0eny6A/exec';
 
         async function callGoogleScript(method = 'GET', params = {}) {
             const url = new URL(SCRIPT_URL);
@@ -2802,7 +2802,8 @@
                         document.getElementById('applyResultFilterBtn').click();
                         
                         // Sync to server in background (non-blocking)
-                        // Run both updates in parallel for speed
+                        console.log('[Sync] Starting background sync to server...');
+                        
                         Promise.all([
                             callGoogleScript('POST', {
                                 action: 'updateResult',
@@ -2810,12 +2811,17 @@
                             }),
                             this.recalculateFinalGradeAsync(result.namaLengkap, result.kodesoal, newNilai)
                         ]).then(([resultResponse, gradeResponse]) => {
-                            if (resultResponse.status !== 'success') {
-                                console.error('Background sync failed for result:', resultResponse.message);
+                            console.log('[Sync] Result response:', resultResponse);
+                            if (resultResponse && resultResponse.status === 'success') {
+                                console.log('[Sync] ✓ Background sync completed successfully');
+                                UI.showNotification('Data tersinkronisasi ke server!', 'success');
+                            } else {
+                                console.error('[Sync] ✗ Background sync failed:', resultResponse);
+                                UI.showNotification('Sinkronisasi gagal. Coba refresh halaman.', 'warning');
                             }
-                            console.log('Background sync completed for result and grade');
                         }).catch(err => {
-                            console.error('Background sync error:', err);
+                            console.error('[Sync] ✗ Background sync error:', err);
+                            UI.showNotification('Error sinkronisasi: ' + err.message, 'error');
                         });
                         
                     } catch (error) {
