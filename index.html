@@ -5755,11 +5755,8 @@
             document.getElementById('closeQuestionListBtn').addEventListener('click', () => UI.hideQuestionListModal());
             document.getElementById('questionListModal').addEventListener('click', (e) => { if (e.target === e.currentTarget) UI.hideQuestionListModal(); });
 
-            // Listener for the new Gemini modal
-            const geminiModal = document.getElementById('geminiModal');
-            if(geminiModal) {
-                geminiModal.addEventListener('click', (e) => { if (e.target === e.currentTarget) UI.hideGeminiModal(); });
-            }
+            // Gemini modal should NOT close when clicking outside - only via buttons
+            // (Event listener removed intentionally)
             
             document.getElementById('reEnterFullscreenBtn').addEventListener('click', async () => {
                 try {
