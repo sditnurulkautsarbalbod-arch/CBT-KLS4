@@ -2432,14 +2432,39 @@
             deleteQuestion(id) {
                 UI.showConfirmModal('Konfirmasi Hapus', 'Apakah Anda yakin ingin menghapus soal ini?', async () => {
                     try {
-                        // Instant delete from IndexedDB + background sync
-                        await DataService.deleteQuestion(id);
+                        console.log('[Delete] Deleting question with ID:', id);
+                        
+                        // Show loading indicator
+                        UI.showNotification('Menghapus soal...', 'info');
+                        
+                        // Delete from server FIRST (synchronous delete)
+                        const serverResult = await callGoogleScript('POST', { 
+                            action: 'deleteQuestion', 
+                            data: { id: id } 
+                        });
+                        
+                        if (serverResult.status !== 'success') {
+                            throw new Error(serverResult.message || 'Gagal menghapus dari server');
+                        }
+                        
+                        // Then delete from IndexedDB
+                        await IndexedDBHelper.deleteFromStore('questions', id);
+                        
+                        // Clear ALL caches
                         AppState.cache.clear();
+                        
+                        // Clear IndexedDB store to force fresh fetch
+                        await IndexedDBHelper.clearStore('questions');
+                        
                         UI.showNotification('Soal berhasil dihapus!', 'success');
-                        document.getElementById('applyFilterBtn').click();
+                        
+                        // Refresh from server (now consistent)
+                        setTimeout(() => {
+                            UI.loadAndRenderPaginatedQuestions(true);
+                        }, 100);
                     } catch (error) {
                         console.error("Error removing document: ", error);
-                        UI.showNotification('Gagal menghapus soal!', 'error');
+                        UI.showNotification('Gagal menghapus soal: ' + error.message, 'error');
                     }
                 });
             },
@@ -3429,15 +3454,38 @@
                     async () => {
                         const idsToDelete = questionsToDelete.map(q => q.id);
                         try {
-                            // Instant delete from IndexedDB + background sync
-                            for (const id of idsToDelete) {
-                                await DataService.deleteQuestion(id);
+                            // Show loading indicator
+                            UI.showNotification('Menghapus soal...', 'info');
+                            
+                            // Delete from server FIRST (batch delete)
+                            const serverResult = await callGoogleScript('POST', { 
+                                action: 'deleteQuestionsBatch', 
+                                data: { ids: idsToDelete } 
+                            });
+                            
+                            if (serverResult.status !== 'success') {
+                                throw new Error(serverResult.message || 'Gagal menghapus dari server');
                             }
-                            AppState.cache.clear(); // Clear cache
+                            
+                            // Then delete from IndexedDB
+                            for (const id of idsToDelete) {
+                                await IndexedDBHelper.deleteFromStore('questions', id);
+                            }
+                            
+                            // Clear ALL caches
+                            AppState.cache.clear();
+                            
+                            // Clear IndexedDB store to force fresh fetch
+                            await IndexedDBHelper.clearStore('questions');
+                            
                             UI.showNotification('Soal yang Anda pilih berhasil dihapus!', 'success');
-                            document.getElementById('applyFilterBtn').click();
+                            
+                            // Refresh from server (now consistent)
+                            setTimeout(() => {
+                                UI.loadAndRenderPaginatedQuestions(true);
+                            }, 100);
                         } catch (error) {
-                            UI.showNotification('Gagal menghapus soal!', 'error');
+                            UI.showNotification('Gagal menghapus soal: ' + error.message, 'error');
                             console.error("Error deleting filtered questions: ", error);
                         }
                     }
@@ -5342,7 +5390,7 @@
                 });
             },
             
-            async loadAndRenderPaginatedQuestions() {
+            async loadAndRenderPaginatedQuestions(forceRefresh = false) {
                 const questionsList = document.getElementById('questionsList');
                 questionsList.innerHTML = `<div class="text-center p-8"><i class="fas fa-spinner fa-spin text-2xl text-blue-600"></i><p class="mt-2 text-gray-600">Memuat soal...</p></div>`;
 
@@ -5356,6 +5404,12 @@
                 AppState.filters.questions = filters; // Save current filters for view/edit
 
                 const cacheKey = AppState.cache.generateKey('questions', filters);
+                
+                // Clear cache if force refresh
+                if (forceRefresh) {
+                    AppState.cache.delete(cacheKey);
+                }
+                
                 let cachedData = AppState.cache.get(cacheKey);
 
                 if (!cachedData) {
@@ -5363,11 +5417,16 @@
                         // OFFLINE-FIRST: Read from IndexedDB first
                         let allQuestions = await IndexedDBHelper.getFromStore('questions');
                         
-                        // If no data in IndexedDB, fetch from server
-                        if (!allQuestions || allQuestions.length === 0) {
+                        // If no data in IndexedDB OR force refresh, fetch from server
+                        if (!allQuestions || allQuestions.length === 0 || forceRefresh) {
                             const params = { action: 'getQuestions', ...filters };
                             const result = await callGoogleScript('GET', params);
                             if (result.status === 'success') {
+                                // Clear old data from IndexedDB before saving new
+                                if (forceRefresh) {
+                                    await IndexedDBHelper.clearStore('questions');
+                                }
+                                
                                 allQuestions = result.data;
                                 // Save to IndexedDB for future use
                                 for (const item of allQuestions) {
