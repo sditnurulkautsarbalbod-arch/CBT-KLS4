@@ -2453,44 +2453,39 @@
                 });
             },
 
-            deleteQuestion(id) {
-                UI.showConfirmModal('Konfirmasi Hapus', 'Apakah Anda yakin ingin menghapus soal ini?', async () => {
-                    try {
-                        console.log('[Delete] Deleting question with ID:', id);
-                        
-                        // Show loading indicator
-                        UI.showNotification('Menghapus soal...', 'info');
-                        
-                        // Delete from server FIRST (synchronous delete)
-                        const serverResult = await callGoogleScript('POST', { 
-                            action: 'deleteQuestion', 
-                            data: { id: id } 
-                        });
-                        
-                        if (serverResult.status !== 'success') {
-                            throw new Error(serverResult.message || 'Gagal menghapus dari server');
-                        }
-                        
-                        // Then delete from IndexedDB
-                        await IndexedDBHelper.deleteFromStore('questions', id);
-                        
-                        // Clear ALL caches
-                        AppState.cache.clear();
-                        
-                        // Clear IndexedDB store to force fresh fetch
-                        await IndexedDBHelper.clearStore('questions');
-                        
-                        UI.showNotification('Soal berhasil dihapus!', 'success');
-                        
-                        // Refresh from server (now consistent)
-                        setTimeout(() => {
-                            UI.loadAndRenderPaginatedQuestions(true);
-                        }, 100);
-                    } catch (error) {
-                        console.error("Error removing document: ", error);
-                        UI.showNotification('Gagal menghapus soal: ' + error.message, 'error');
+            async deleteQuestion(id) {
+                try {
+                    console.log('[Delete] Deleting question with ID:', id);
+                    
+                    // Delete from server FIRST (synchronous delete)
+                    const serverResult = await callGoogleScript('POST', { 
+                        action: 'deleteQuestion', 
+                        data: { id: id } 
+                    });
+                    
+                    if (serverResult.status !== 'success') {
+                        throw new Error(serverResult.message || 'Gagal menghapus dari server');
                     }
-                });
+                    
+                    // Then delete from IndexedDB
+                    await IndexedDBHelper.deleteFromStore('questions', id);
+                    
+                    // Clear ALL caches
+                    AppState.cache.clear();
+                    
+                    // Clear IndexedDB store to force fresh fetch
+                    await IndexedDBHelper.clearStore('questions');
+                    
+                    UI.showNotification('Soal berhasil dihapus!', 'success');
+                    
+                    // Refresh from server (now consistent)
+                    setTimeout(() => {
+                        UI.loadAndRenderPaginatedQuestions(true);
+                    }, 100);
+                } catch (error) {
+                    console.error("Error removing document: ", error);
+                    UI.showNotification('Gagal menghapus soal: ' + error.message, 'error');
+                }
             },
 
             renderFilteredQuestions(questions) {
