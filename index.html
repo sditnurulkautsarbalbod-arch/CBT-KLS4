@@ -4011,6 +4011,7 @@
                     console.error('Error loading dashboard data:', error);
                 }
                 
+                const user = AppState.currentUser;
                 let dashboardContent = `<div class="fade-in"><h2 class="text-3xl font-bold text-gray-900 mb-8">Selamat Datang, ${user.nama}</h2>`;
 
                 if (user.role === 'admin') {
