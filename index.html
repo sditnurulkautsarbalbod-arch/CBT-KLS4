@@ -2657,7 +2657,8 @@
                     button.disabled = true;
                     button.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Menyimpan...';
 
-                    const questionsToSave = questions.map(q => ({
+                    const questionsToSave = questions.map((q, index) => ({
+                        id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${index}`,
                         tahunAjaran: metadata.tahunAjaran,
                         semester: metadata.semester,
                         mataPelajaran: metadata.mataPelajaran,
@@ -2670,6 +2671,7 @@
                         jawabanBenar: q.jawabanBenar || null,
                         gambar: null,
                         createdBy: AppState.currentUser.nama,
+                        createdAt: new Date().toISOString(),
                     }));
 
                     try {
