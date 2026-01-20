@@ -1594,7 +1594,7 @@
         // =================================================================
         // GOOGLE SCRIPT HELPER
         // =================================================================
-        const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxqXNG5e9IC33GyhrTbDqe6kDYvtYlJ-AMbYcPQEbaa8mywsZRIRjBdaqLP3dRYKipn/exec';
+        const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyx5oWrP4tTcCsoXzpTTT4nuvxpMo7NfvOXbgMO1zMwqPqPjFHDTWYzM5KYGCf8FC7xVw/exec';
 
         async function callGoogleScript(method = 'GET', params = {}) {
             const url = new URL(SCRIPT_URL);
@@ -2787,34 +2787,37 @@
                     const newStatus = newNilai > 0 ? 'benar' : 'salah';
                     
                     try {
-                        // Show loading indicator
-                        UI.showNotification('Menyimpan nilai...', 'info');
-                        
-                        // Update to server FIRST (synchronous update)
-                        const serverResult = await callGoogleScript('POST', {
-                            action: 'updateResult',
-                            data: { resultId: resultId, nilai: newNilai, status: newStatus }
-                        });
-                        
-                        if (serverResult.status !== 'success') {
-                            throw new Error(serverResult.message || 'Gagal menyimpan ke server');
-                        }
-                        
-                        // Then update IndexedDB
+                        // OPTIMISTIC UPDATE: Update IndexedDB first (instant)
                         await DataService.updateResult({
                             resultId: resultId,
                             nilai: newNilai,
                             status: newStatus
                         });
                         
-                        AppState.cache.clear(); // Clear cache to reflect changes
-
-                        // Recalculate final grade - also sync to server
-                        await this.recalculateFinalGradeSync(result.namaLengkap, result.kodesoal);
+                        AppState.cache.clear();
                         
+                        // Close modal immediately (instant feedback)
                         UI.hideModal();
                         UI.showNotification('Nilai berhasil diperbarui!', 'success');
-                        document.getElementById('applyResultFilterBtn').click(); // Refresh view
+                        document.getElementById('applyResultFilterBtn').click();
+                        
+                        // Sync to server in background (non-blocking)
+                        // Run both updates in parallel for speed
+                        Promise.all([
+                            callGoogleScript('POST', {
+                                action: 'updateResult',
+                                data: { resultId: resultId, nilai: newNilai, status: newStatus }
+                            }),
+                            this.recalculateFinalGradeAsync(result.namaLengkap, result.kodesoal, newNilai)
+                        ]).then(([resultResponse, gradeResponse]) => {
+                            if (resultResponse.status !== 'success') {
+                                console.error('Background sync failed for result:', resultResponse.message);
+                            }
+                            console.log('Background sync completed for result and grade');
+                        }).catch(err => {
+                            console.error('Background sync error:', err);
+                        });
+                        
                     } catch (error) {
                         console.error("Error updating grade: ", error);
                         UI.showNotification('Gagal memperbarui nilai: ' + error.message, 'error');
@@ -3213,6 +3216,66 @@
                     }
                 } catch (error) {
                     console.error(`Failed to recalculate and sync final grade for ${studentName}:`, error);
+                }
+            },
+
+            // Async version for background processing (non-blocking)
+            async recalculateFinalGradeAsync(studentName, examCode, newNilai) {
+                try {
+                    // Read from IndexedDB
+                    const allResults = await IndexedDBHelper.getFromStore('results');
+                    const studentResults = allResults.filter(r => 
+                        r.namaLengkap === studentName && r.kodesoal === examCode
+                    );
+            
+                    if (!studentResults || studentResults.length === 0) return;
+
+                    const questions = await DataService.getQuestions(examCode);
+                    if (!questions || questions.length === 0) return;
+                    const totalQuestionsForExam = questions.length;
+
+                    let totalScore = 0;
+                    studentResults.forEach(r => {
+                        if (r.status !== 'perlu dinilai') {
+                            totalScore += Number(r.nilai) || 0;
+                        }
+                    });
+                    
+                    const finalScore = Math.round(totalScore / totalQuestionsForExam);
+                    const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
+                    
+                    const allGrades = await IndexedDBHelper.getFromStore('grades');
+                    const existingGrades = allGrades.filter(g => 
+                        g.namaSiswa === studentName && g.kodeSoal === examCode
+                    );
+
+                    if (existingGrades && existingGrades.length > 0) {
+                        const existingGrade = existingGrades[0];
+                        
+                        // Update IndexedDB first
+                        await DataService.updateGrade({
+                            gradeId: existingGrade.gradeId,
+                            nilai: finalScore,
+                            grade: grade,
+                            keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
+                        });
+                        
+                        // Then sync to server
+                        await callGoogleScript('POST', {
+                            action: 'updateGrade',
+                            data: {
+                                gradeId: existingGrade.gradeId,
+                                nilai: finalScore,
+                                grade: grade,
+                                keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
+                            }
+                        });
+                        
+                        AppState.cache.delete('grades');
+                        console.log(`Grade synced for ${studentName}: ${finalScore}`);
+                    }
+                } catch (error) {
+                    console.error(`Failed to recalculate grade async for ${studentName}:`, error);
                 }
             },
 
