@@ -1997,8 +1997,17 @@
                 UI.showConfirmModal('Konfirmasi Hapus', 'Apakah Anda yakin ingin menghapus soal ini?', async () => {
                     console.log('[Delete] Deleting question with ID:', id);
                     
-                    // OPTIMISTIC UI: Clear cache and refresh immediately
-                    AppState.cache.clear();
+                    // OPTIMISTIC UI: Remove item from ALL cache entries containing this question
+                    AppState.cache.data.forEach((value, key) => {
+                        if (key.startsWith('questions') && Array.isArray(value)) {
+                            const index = value.findIndex(q => q.id === id);
+                            if (index !== -1) {
+                                value.splice(index, 1);
+                            }
+                        }
+                    });
+                    
+                    // Re-render from modified cache
                     UI.loadAndRenderPaginatedQuestions(false);
                     
                     // BACKGROUND: Delete from server (fire and forget)
@@ -2010,7 +2019,6 @@
                             console.log('[Delete] Question deleted successfully:', id);
                         } else {
                             console.error('[Sync] Delete failed:', serverResult.message);
-                            UI.showNotification('Gagal sync hapus ke server', 'warning');
                             UI.loadAndRenderPaginatedQuestions(true);
                         }
                     }).catch(err => {
@@ -2377,24 +2385,17 @@
                 UI.showConfirmModal('Konfirmasi Hapus', 'Apakah Anda yakin ingin menghapus detail hasil ini?', async () => {
                     console.log('[Delete] Deleting result with ID:', id);
                     
-                    // OPTIMISTIC UI: Remove from cache immediately
-                    const filters = {
-                        action: 'getResults',
-                        tahunAjaran: document.getElementById('filterResultTahunAjaran').value,
-                        semester: document.getElementById('filterResultSemester').value,
-                        kodesoal: document.getElementById('filterResultCode').value,
-                        mataPelajaran: document.getElementById('filterResultSubject').value,
-                        kelas: document.getElementById('filterResultClass').value,
-                        namaLengkap: document.getElementById('filterResultStudent').value,
-                    };
-                    const cacheKey = AppState.cache.generateKey('results', filters);
-                    const cachedResults = AppState.cache.get(cacheKey);
-                    if (cachedResults) {
-                        const idx = cachedResults.findIndex(r => r.resultId === id);
-                        if (idx !== -1) cachedResults.splice(idx, 1);
-                    }
+                    // OPTIMISTIC UI: Remove item from ALL cache entries containing this result
+                    AppState.cache.data.forEach((value, key) => {
+                        if (key.startsWith('results') && Array.isArray(value)) {
+                            const index = value.findIndex(r => r.resultId === id);
+                            if (index !== -1) {
+                                value.splice(index, 1);
+                            }
+                        }
+                    });
                     
-                    // Refresh UI instantly
+                    // Re-render from modified cache
                     UI.loadAndRenderPaginatedResults(false);
                     
                     // BACKGROUND: Delete from server (fire and forget)
@@ -2404,13 +2405,10 @@
                     }).then(serverResult => {
                         if (serverResult.status !== 'success') {
                             console.error('[Sync] Delete failed:', serverResult.message);
-                            UI.showNotification('Gagal sync hapus ke server', 'warning');
-                            // Refresh to get actual state
                             UI.loadAndRenderPaginatedResults(true);
                         }
                     }).catch(err => {
                         console.error('[Sync] Delete error:', err);
-                        UI.showNotification('Gagal sync hapus ke server', 'warning');
                     });
                 });
             },
@@ -2889,8 +2887,17 @@
                 UI.showConfirmModal('Konfirmasi Hapus', 'Apakah Anda yakin ingin menghapus data nilai ini?', async () => {
                     console.log('[Delete] Deleting grade with ID:', gradeId);
                     
-                    // OPTIMISTIC UI: Clear cache and refresh immediately
-                    AppState.cache.clear();
+                    // OPTIMISTIC UI: Remove item from ALL cache entries containing this grade
+                    AppState.cache.data.forEach((value, key) => {
+                        if (key.startsWith('grades') && Array.isArray(value)) {
+                            const index = value.findIndex(g => g.gradeId === gradeId);
+                            if (index !== -1) {
+                                value.splice(index, 1);
+                            }
+                        }
+                    });
+                    
+                    // Re-render from modified cache
                     UI.loadAndRenderPaginatedGrades(false);
                     
                     // BACKGROUND: Delete from server (fire and forget)
@@ -2900,12 +2907,10 @@
                     }).then(serverResult => {
                         if (serverResult.status !== 'success') {
                             console.error('[Sync] Delete failed:', serverResult.message);
-                            UI.showNotification('Gagal sync hapus ke server', 'warning');
                             UI.loadAndRenderPaginatedGrades(true);
                         }
                     }).catch(err => {
                         console.error('[Sync] Delete error:', err);
-                        UI.showNotification('Gagal sync hapus ke server', 'warning');
                     });
                 });
             },
@@ -3116,8 +3121,18 @@
                     async () => {
                         const idsToDelete = questionsToDelete.map(q => q.id);
                         
-                        // OPTIMISTIC UI: Clear cache and refresh immediately
-                        AppState.cache.clear();
+                        // OPTIMISTIC UI: Remove items from ALL cache entries
+                        AppState.cache.data.forEach((value, key) => {
+                            if (key.startsWith('questions') && Array.isArray(value)) {
+                                for (let i = value.length - 1; i >= 0; i--) {
+                                    if (idsToDelete.includes(value[i].id)) {
+                                        value.splice(i, 1);
+                                    }
+                                }
+                            }
+                        });
+                        
+                        // Re-render from modified cache
                         UI.loadAndRenderPaginatedQuestions(false);
                         
                         // BACKGROUND: Delete from server (fire and forget)
@@ -3159,8 +3174,18 @@
                     async () => {
                         const resultIds = resultsToDelete.map(r => r.resultId);
                         
-                        // OPTIMISTIC UI: Clear cache and refresh immediately
-                        AppState.cache.clear();
+                        // OPTIMISTIC UI: Remove items from ALL cache entries
+                        AppState.cache.data.forEach((value, key) => {
+                            if (key.startsWith('results') && Array.isArray(value)) {
+                                for (let i = value.length - 1; i >= 0; i--) {
+                                    if (resultIds.includes(value[i].resultId)) {
+                                        value.splice(i, 1);
+                                    }
+                                }
+                            }
+                        });
+                        
+                        // Re-render from modified cache
                         UI.loadAndRenderPaginatedResults(false);
                         
                         // BACKGROUND: Delete from server (fire and forget)
@@ -3201,8 +3226,18 @@
                     async () => {
                         const gradeIds = gradesToDelete.map(g => g.gradeId);
                         
-                        // OPTIMISTIC UI: Clear cache and refresh immediately
-                        AppState.cache.clear();
+                        // OPTIMISTIC UI: Remove items from ALL cache entries
+                        AppState.cache.data.forEach((value, key) => {
+                            if (key.startsWith('grades') && Array.isArray(value)) {
+                                for (let i = value.length - 1; i >= 0; i--) {
+                                    if (gradeIds.includes(value[i].gradeId)) {
+                                        value.splice(i, 1);
+                                    }
+                                }
+                            }
+                        });
+                        
+                        // Re-render from modified cache
                         UI.loadAndRenderPaginatedGrades(false);
                         
                         // BACKGROUND: Delete from server (fire and forget)
