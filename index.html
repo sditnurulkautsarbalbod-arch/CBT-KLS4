@@ -668,38 +668,11 @@
                 // Listen for online/offline events
                 window.addEventListener('online', () => {
                     this.isOnline = true;
-                    this.updateOnlineIndicator();
                 });
                 
                 window.addEventListener('offline', () => {
                     this.isOnline = false;
-                    this.updateOnlineIndicator();
                 });
-                
-                // Initial indicator
-                this.updateOnlineIndicator();
-            },
-            
-            // Update online/offline indicator in UI
-            updateOnlineIndicator() {
-                let indicator = document.getElementById('syncIndicator');
-                if (!indicator) {
-                    // Create indicator if not exists
-                    indicator = document.createElement('div');
-                    indicator.id = 'syncIndicator';
-                    indicator.style.cssText = 'position:fixed;bottom:20px;right:20px;padding:8px 16px;border-radius:20px;font-size:12px;z-index:9999;display:flex;align-items:center;gap:8px;box-shadow:0 2px 10px rgba(0,0,0,0.2);';
-                    document.body.appendChild(indicator);
-                }
-                
-                if (this.isOnline) {
-                    indicator.style.backgroundColor = '#10B981';
-                    indicator.style.color = 'white';
-                    indicator.innerHTML = '<i class="fas fa-wifi"></i> Online';
-                } else {
-                    indicator.style.backgroundColor = '#EF4444';
-                    indicator.style.color = 'white';
-                    indicator.innerHTML = '<i class="fas fa-wifi-slash"></i> Offline';
-                }
             }
         };
 
@@ -5185,14 +5158,11 @@
             // Fungsi untuk refresh data grades dari server secara manual
             async refreshGradesFromServer() {
                 if (!SyncManager.isOnline) {
-                    UI.showNotification('Tidak dapat menyinkronkan - Anda sedang offline.', 'error');
                     return;
                 }
                 
                 // Clear all grades cache
                 AppState.cache.clear();
-                
-                UI.showNotification('Menyinkronkan data dengan Google Sheet...', 'info');
                 
                 // Reset pagination
                 AppState.pagination.grades.currentPage = 1;
@@ -5204,7 +5174,6 @@
             // Fungsi untuk refresh data questions dari server secara manual
             async refreshQuestionsFromServer() {
                 if (!SyncManager.isOnline) {
-                    UI.showNotification('Tidak dapat menyinkronkan - Anda sedang offline.', 'error');
                     return;
                 }
                 
@@ -5221,7 +5190,6 @@
             // Fungsi untuk refresh data results dari server secara manual
             async refreshResultsFromServer() {
                 if (!SyncManager.isOnline) {
-                    UI.showNotification('Tidak dapat menyinkronkan - Anda sedang offline.', 'error');
                     return;
                 }
                 
