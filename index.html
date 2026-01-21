@@ -4957,58 +4957,45 @@
 
                 if (!cachedData) {
                     try {
-                        // OFFLINE-FIRST: Read from IndexedDB first
-                        let allQuestions = await IndexedDBHelper.getFromStore('questions');
+                        // Fetch directly from server
+                        const params = { action: 'getQuestions', ...filters };
+                        const result = await callGoogleScript('GET', params);
                         
-                        // If no data in IndexedDB OR force refresh, fetch from server
-                        if (!allQuestions || allQuestions.length === 0 || forceRefresh) {
-                            const params = { action: 'getQuestions', ...filters };
-                            const result = await callGoogleScript('GET', params);
-                            if (result.status === 'success') {
-                                // Clear old data from IndexedDB before saving new
-                                if (forceRefresh) {
-                                    await IndexedDBHelper.clearStore('questions');
-                                }
-                                
-                                allQuestions = result.data;
-                                // Save to IndexedDB for future use
-                                for (const item of allQuestions) {
-                                    await IndexedDBHelper.saveToStore('questions', item);
-                                }
-                            } else {
-                                throw new Error(result.message || 'Gagal memuat soal.');
+                        if (result.status === 'success') {
+                            let allQuestions = result.data || [];
+                            
+                            // Apply filters locally
+                            let filteredQuestions = allQuestions.filter(q => {
+                                if (filters.tahunAjaran && q.tahunAjaran !== filters.tahunAjaran) return false;
+                                if (filters.semester && q.semester !== filters.semester) return false;
+                                if (filters.kelas && q.kelas !== filters.kelas) return false;
+                                if (filters.mataPelajaran && q.mataPelajaran !== filters.mataPelajaran) return false;
+                                if (filters.kode && q.kode !== filters.kode) return false;
+                                return true;
+                            });
+                            
+                            // Filter by teacher's grade if applicable
+                            if (AppState.currentUser.role === 'guru' && AppState.currentUser.kelas) {
+                                const teacherGrade = AppState.currentUser.kelas.charAt(0);
+                                filteredQuestions = filteredQuestions.filter(q => q.kelas && q.kelas.startsWith(teacherGrade));
                             }
+                            
+                            // Sort by type and creation time
+                            const typeOrder = { 'pilihan_ganda': 1, 'isian': 2, 'uraian': 3 };
+                            filteredQuestions.sort((a, b) => {
+                                const typeA = typeOrder[a.tipe] || 99;
+                                const typeB = typeOrder[b.tipe] || 99;
+                                if (typeA !== typeB) return typeA - typeB;
+                                const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+                                const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+                                return timeA - timeB;
+                            });
+                            
+                            cachedData = filteredQuestions;
+                            AppState.cache.set(cacheKey, cachedData);
+                        } else {
+                            throw new Error(result.message || 'Gagal memuat soal.');
                         }
-                        
-                        // Apply filters locally
-                        let filteredQuestions = allQuestions.filter(q => {
-                            if (filters.tahunAjaran && q.tahunAjaran !== filters.tahunAjaran) return false;
-                            if (filters.semester && q.semester !== filters.semester) return false;
-                            if (filters.kelas && q.kelas !== filters.kelas) return false;
-                            if (filters.mataPelajaran && q.mataPelajaran !== filters.mataPelajaran) return false;
-                            if (filters.kode && q.kode !== filters.kode) return false;
-                            return true;
-                        });
-                        
-                        // Filter by teacher's grade if applicable
-                        if (AppState.currentUser.role === 'guru' && AppState.currentUser.kelas) {
-                            const teacherGrade = AppState.currentUser.kelas.charAt(0);
-                            filteredQuestions = filteredQuestions.filter(q => q.kelas && q.kelas.startsWith(teacherGrade));
-                        }
-                        
-                        // Sort by type and creation time
-                        const typeOrder = { 'pilihan_ganda': 1, 'isian': 2, 'uraian': 3 };
-                        filteredQuestions.sort((a, b) => {
-                            const typeA = typeOrder[a.tipe] || 99;
-                            const typeB = typeOrder[b.tipe] || 99;
-                            if (typeA !== typeB) return typeA - typeB;
-                            const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-                            const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-                            return timeA - timeB;
-                        });
-                        
-                        cachedData = filteredQuestions;
-                        AppState.cache.set(cacheKey, cachedData);
                     } catch (error) {
                         UI.showNotification(error.message || 'Gagal memuat soal.', 'error');
                         questionsList.innerHTML = '<div class="bg-white rounded-lg shadow p-6 text-center text-red-500">Gagal memuat soal.</div>';
@@ -5117,32 +5104,18 @@
                 let allGrades = [];
 
                 try {
-                    // SERVER-FIRST: Always fetch from Google Sheets first for accurate data
-                    if (SyncManager.isOnline) {
-                        console.log('[Grades] Fetching fresh data from server...');
-                        const result = await callGoogleScript('GET', {
-                            action: 'getGrades',
-                            ...filters
-                        });
+                    // Fetch directly from Google Sheets
+                    console.log('[Grades] Fetching fresh data from server...');
+                    const result = await callGoogleScript('GET', {
+                        action: 'getGrades',
+                        ...filters
+                    });
 
-                        if (result.status === 'success') {
-                            // Clear old IndexedDB data and save fresh data
-                            await IndexedDBHelper.clearStore('grades');
-                            
-                            allGrades = result.data || [];
-                            // Save to IndexedDB for offline fallback
-                            for (const item of allGrades) {
-                                await IndexedDBHelper.saveToStore('grades', item);
-                            }
-                            console.log(`[Grades] Loaded ${allGrades.length} grades from server`);
-                        } else {
-                            throw new Error(result.message || 'Gagal memuat data nilai dari server');
-                        }
+                    if (result.status === 'success') {
+                        allGrades = result.data || [];
+                        console.log(`[Grades] Loaded ${allGrades.length} grades from server`);
                     } else {
-                        // OFFLINE FALLBACK: Read from IndexedDB only when offline
-                        console.log('[Grades] Offline mode - loading from IndexedDB...');
-                        allGrades = await IndexedDBHelper.getFromStore('grades') || [];
-                        UI.showNotification('Mode offline - menampilkan data tersimpan', 'info');
+                        throw new Error(result.message || 'Gagal memuat data nilai dari server');
                     }
                     
                     // Apply filters locally (in case server returned all data)
@@ -5172,31 +5145,6 @@
                     });
                 } catch (error) {
                     console.error("Error fetching grades:", error);
-                    
-                    // Try IndexedDB as last resort fallback
-                    try {
-                        allGrades = await IndexedDBHelper.getFromStore('grades') || [];
-                        if (allGrades.length > 0) {
-                            UI.showNotification('Gagal memuat dari server - menampilkan data tersimpan', 'warning');
-                            
-                            let filteredGrades = allGrades.filter(g => {
-                                if (filters.tahunAjaran && g.tahunAjaran !== filters.tahunAjaran) return false;
-                                if (filters.semester && g.semester !== filters.semester) return false;
-                                if (filters.kodeSoal && g.kodeSoal !== filters.kodeSoal) return false;
-                                if (filters.mataPelajaran && g.mataPelajaran !== filters.mataPelajaran) return false;
-                                if (filters.kelas && g.kelas !== filters.kelas) return false;
-                                if (filters.namaSiswa && g.namaSiswa !== filters.namaSiswa) return false;
-                                return true;
-                            });
-                            
-                            filteredGrades.sort((a, b) => a.namaSiswa.localeCompare(b.namaSiswa));
-                            Management.renderFilteredGrades(filteredGrades);
-                            return;
-                        }
-                    } catch (idbError) {
-                        console.error("IndexedDB fallback failed:", idbError);
-                    }
-                    
                     gradesTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-red-500"><i class="fas fa-exclamation-triangle mr-2"></i>Gagal memuat data. Periksa koneksi dan coba lagi.</td></tr>';
                 }
             },
@@ -5210,7 +5158,6 @@
                 
                 // Clear all grades cache
                 AppState.cache.clear();
-                await IndexedDBHelper.clearStore('grades');
                 
                 UI.showNotification('Menyinkronkan data dengan Google Sheet...', 'info');
                 
