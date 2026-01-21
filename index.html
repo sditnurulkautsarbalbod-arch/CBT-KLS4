@@ -3152,16 +3152,12 @@
                             action: 'deleteQuestionsBatch', 
                             data: { ids: idsToDelete } 
                         }).then(serverResult => {
-                            if (serverResult.status === 'success') {
-                                UI.showNotification('Soal berhasil dihapus!', 'success');
-                            } else {
+                            if (serverResult.status !== 'success') {
                                 console.error('[Sync] Bulk delete failed:', serverResult.message);
-                                UI.showNotification('Gagal sync hapus ke server', 'warning');
                                 UI.loadAndRenderPaginatedQuestions(true);
                             }
                         }).catch(err => {
                             console.error('[Sync] Bulk delete error:', err);
-                            UI.showNotification('Gagal sync hapus ke server', 'warning');
                         });
                     }
                 );
@@ -3199,16 +3195,12 @@
                             action: 'deleteResults', 
                             data: { resultIds: resultIds } 
                         }).then(serverResult => {
-                            if (serverResult.status === 'success') {
-                                UI.showNotification('Hasil ujian berhasil dihapus!', 'success');
-                            } else {
+                            if (serverResult.status !== 'success') {
                                 console.error('[Sync] Bulk delete failed:', serverResult.message);
-                                UI.showNotification('Gagal sync hapus ke server', 'warning');
                                 UI.loadAndRenderPaginatedResults(true);
                             }
                         }).catch(err => {
                             console.error('[Sync] Bulk delete error:', err);
-                            UI.showNotification('Gagal sync hapus ke server', 'warning');
                         });
                     }
                 );
@@ -3245,16 +3237,12 @@
                             action: 'deleteGrades', 
                             data: { gradeIds: gradeIds } 
                         }).then(serverResult => {
-                            if (serverResult.status === 'success') {
-                                UI.showNotification('Nilai berhasil dihapus!', 'success');
-                            } else {
+                            if (serverResult.status !== 'success') {
                                 console.error('[Sync] Bulk delete failed:', serverResult.message);
-                                UI.showNotification('Gagal sync hapus ke server', 'warning');
                                 UI.loadAndRenderPaginatedGrades(true);
                             }
                         }).catch(err => {
                             console.error('[Sync] Bulk delete error:', err);
-                            UI.showNotification('Gagal sync hapus ke server', 'warning');
                         });
                     }
                 );
@@ -4124,6 +4112,7 @@
                         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
                             <h2 class="text-2xl font-bold text-gray-900">Manajemen Soal</h2>
                             <div class="flex flex-wrap items-center justify-start sm:justify-end gap-2 w-full sm:w-auto">
+                                <button onclick="UI.refreshQuestionsFromServer()" class="bg-cyan-600 text-white px-4 py-2 rounded-lg hover:bg-cyan-700 transition duration-200" title="Sinkronkan data dengan Google Sheet"><i class="fas fa-sync-alt mr-2"></i>Refresh</button>
                                 <button onclick="Management.showAutoGenerateModal()" class="bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700 transition duration-200"><i class="fas fa-magic mr-2"></i>Buat Otomatis</button>
                                 <button onclick="Management.deleteFilteredQuestions()" class="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition duration-200"><i class="fas fa-trash-alt mr-2"></i>Hapus</button>
                                 <button onclick="Management.downloadQuestionsPDF()" class="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition duration-200"><i class="fas fa-download mr-2"></i>Download</button>
@@ -4162,6 +4151,7 @@
                         <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
                             <h2 class="text-2xl font-bold text-gray-900">Hasil Ujian</h2>
                             <div class="flex flex-wrap items-center justify-start sm:justify-end gap-2 w-full sm:w-auto">
+                                <button onclick="UI.refreshResultsFromServer()" class="bg-cyan-600 text-white px-4 py-2 rounded-lg hover:bg-cyan-700 transition duration-200" title="Sinkronkan data dengan Google Sheet"><i class="fas fa-sync-alt mr-2"></i>Refresh</button>
                                 <button onclick="Management.gradeAllWithAI()" class="bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700 transition duration-200"><i class="fas fa-calculator mr-2"></i>Nilai Otomatis</button>
                                 <button onclick="Management.deleteFilteredResults()" class="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition duration-200"><i class="fas fa-trash-alt mr-2"></i>Hapus</button>
                                 <button onclick="Management.downloadResultsPDF()" class="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition duration-200"><i class="fas fa-download mr-2"></i>Download PDF</button>
@@ -5208,9 +5198,41 @@
                 AppState.pagination.grades.currentPage = 1;
                 
                 // Reload with fresh data
-                await this.loadAndRenderPaginatedGrades();
+                await this.loadAndRenderPaginatedGrades(true);
+            },
+
+            // Fungsi untuk refresh data questions dari server secara manual
+            async refreshQuestionsFromServer() {
+                if (!SyncManager.isOnline) {
+                    UI.showNotification('Tidak dapat menyinkronkan - Anda sedang offline.', 'error');
+                    return;
+                }
                 
-                UI.showNotification('Data berhasil disinkronkan dari Google Sheet!', 'success');
+                // Clear questions cache
+                AppState.cache.clear();
+                
+                // Reset pagination
+                AppState.pagination.questions.currentPage = 1;
+                
+                // Reload with fresh data
+                await this.loadAndRenderPaginatedQuestions(true);
+            },
+
+            // Fungsi untuk refresh data results dari server secara manual
+            async refreshResultsFromServer() {
+                if (!SyncManager.isOnline) {
+                    UI.showNotification('Tidak dapat menyinkronkan - Anda sedang offline.', 'error');
+                    return;
+                }
+                
+                // Clear results cache
+                AppState.cache.clear();
+                
+                // Reset pagination
+                AppState.pagination.results.currentPage = 1;
+                
+                // Reload with fresh data
+                await this.loadAndRenderPaginatedResults(true);
             }
 
         };
