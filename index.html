@@ -658,173 +658,18 @@
         import { GoogleGenAI, Type } from "@google/genai";
 
         // =================================================================
-        // INDEXEDDB HELPER - Database lokal utama
-        // Arsitektur: Web App → IndexedDB → Google Apps Script
-        // =================================================================
-        const IndexedDBHelper = {
-            dbName: 'CBT_SDIT_NK',
-            dbVersion: 2, // Upgrade version untuk pendingSync store
-            db: null,
-
-            async init() {
-                return new Promise((resolve, reject) => {
-                    const request = indexedDB.open(this.dbName, this.dbVersion);
-                    
-                    request.onerror = () => reject(request.error);
-                    request.onsuccess = () => {
-                        this.db = request.result;
-                        resolve(this.db);
-                    };
-                    
-                    request.onupgradeneeded = (event) => {
-                        const db = event.target.result;
-                        
-                        // Store untuk users
-                        if (!db.objectStoreNames.contains('users')) {
-                            db.createObjectStore('users', { keyPath: 'username' });
-                        }
-                        // Store untuk questions
-                        if (!db.objectStoreNames.contains('questions')) {
-                            const questionStore = db.createObjectStore('questions', { keyPath: 'id' });
-                            questionStore.createIndex('kode', 'kode', { unique: false });
-                        }
-                        // Store untuk results
-                        if (!db.objectStoreNames.contains('results')) {
-                            const resultStore = db.createObjectStore('results', { keyPath: 'resultId' });
-                            resultStore.createIndex('kodesoal', 'kodesoal', { unique: false });
-                        }
-                        // Store untuk grades
-                        if (!db.objectStoreNames.contains('grades')) {
-                            const gradeStore = db.createObjectStore('grades', { keyPath: 'gradeId' });
-                            gradeStore.createIndex('kodeSoal', 'kodeSoal', { unique: false });
-                        }
-                        // Store untuk settings
-                        if (!db.objectStoreNames.contains('settings')) {
-                            db.createObjectStore('settings', { keyPath: 'key' });
-                        }
-                        // Store untuk blocked students
-                        if (!db.objectStoreNames.contains('blockedStudents')) {
-                            db.createObjectStore('blockedStudents', { keyPath: 'blockId' });
-                        }
-                        // Store untuk cache metadata
-                        if (!db.objectStoreNames.contains('cacheMetadata')) {
-                            db.createObjectStore('cacheMetadata', { keyPath: 'storeName' });
-                        }
-                        // Store untuk pending sync queue (NEW)
-                        if (!db.objectStoreNames.contains('pendingSync')) {
-                            const pendingStore = db.createObjectStore('pendingSync', { keyPath: 'syncId', autoIncrement: true });
-                            pendingStore.createIndex('timestamp', 'timestamp', { unique: false });
-                            pendingStore.createIndex('status', 'status', { unique: false });
-                        }
-                    };
-                });
-            },
-
-            async saveToStore(storeName, data) {
-                if (!this.db) await this.init();
-                return new Promise((resolve, reject) => {
-                    const transaction = this.db.transaction([storeName], 'readwrite');
-                    const store = transaction.objectStore(storeName);
-                    
-                    if (Array.isArray(data)) {
-                        data.forEach(item => store.put(item));
-                    } else {
-                        store.put(data);
-                    }
-                    
-                    transaction.oncomplete = () => resolve();
-                    transaction.onerror = () => reject(transaction.error);
-                });
-            },
-
-            async getFromStore(storeName, key = null) {
-                if (!this.db) await this.init();
-                return new Promise((resolve, reject) => {
-                    const transaction = this.db.transaction([storeName], 'readonly');
-                    const store = transaction.objectStore(storeName);
-                    
-                    const request = key ? store.get(key) : store.getAll();
-                    request.onsuccess = () => resolve(request.result);
-                    request.onerror = () => reject(request.error);
-                });
-            },
-
-            async deleteFromStore(storeName, key) {
-                if (!this.db) await this.init();
-                return new Promise((resolve, reject) => {
-                    const transaction = this.db.transaction([storeName], 'readwrite');
-                    const store = transaction.objectStore(storeName);
-                    const request = store.delete(key);
-                    
-                    // Wait for transaction to complete, not just the request
-                    transaction.oncomplete = () => {
-                        console.log(`[IndexedDB] Deleted from ${storeName} with key: ${key}`);
-                        resolve();
-                    };
-                    transaction.onerror = () => {
-                        console.error(`[IndexedDB] Delete error in ${storeName}:`, transaction.error);
-                        reject(transaction.error);
-                    };
-                });
-            },
-
-            async clearStore(storeName) {
-                if (!this.db) await this.init();
-                return new Promise((resolve, reject) => {
-                    const transaction = this.db.transaction([storeName], 'readwrite');
-                    const store = transaction.objectStore(storeName);
-                    const request = store.clear();
-                    request.onsuccess = () => resolve();
-                    request.onerror = () => reject(request.error);
-                });
-            },
-
-            async updateCacheTimestamp(storeName) {
-                await this.saveToStore('cacheMetadata', {
-                    storeName: storeName,
-                    lastUpdated: Date.now()
-                });
-            },
-
-            async isCacheValid(storeName, maxAgeMinutes = 5) {
-                const metadata = await this.getFromStore('cacheMetadata', storeName);
-                if (!metadata) return false;
-                const age = (Date.now() - metadata.lastUpdated) / 1000 / 60;
-                return age < maxAgeMinutes;
-            },
-            
-            // Get all data by index
-            async getByIndex(storeName, indexName, value) {
-                if (!this.db) await this.init();
-                return new Promise((resolve, reject) => {
-                    const transaction = this.db.transaction([storeName], 'readonly');
-                    const store = transaction.objectStore(storeName);
-                    const index = store.index(indexName);
-                    const request = index.getAll(value);
-                    request.onsuccess = () => resolve(request.result);
-                    request.onerror = () => reject(request.error);
-                });
-            }
-        };
-
-        // =================================================================
-        // SYNC MANAGER - Mengelola sinkronisasi IndexedDB ↔ Google Apps Script
-        // Arsitektur: Web App → IndexedDB → Google Apps Script
+        // SYNC MANAGER - Simplified (No IndexedDB)
+        // Direct connection to Google Apps Script
         // =================================================================
         const SyncManager = {
             isOnline: navigator.onLine,
-            isSyncing: false,
-            syncInterval: null,
             
             // Initialize SyncManager
-            async init() {
-                await IndexedDBHelper.init();
-                
+            init() {
                 // Listen for online/offline events
                 window.addEventListener('online', () => {
                     this.isOnline = true;
                     this.updateOnlineIndicator();
-                    this.processQueue(); // Process pending sync when back online
                 });
                 
                 window.addEventListener('offline', () => {
@@ -832,16 +677,8 @@
                     this.updateOnlineIndicator();
                 });
                 
-                // Start periodic sync (every 3 seconds for faster background sync)
-                this.syncInterval = setInterval(() => {
-                    if (this.isOnline) this.processQueue();
-                }, 3000);
-                
-                // Initial sync check
+                // Initial indicator
                 this.updateOnlineIndicator();
-                if (this.isOnline) {
-                    setTimeout(() => this.processQueue(), 2000);
-                }
             },
             
             // Update online/offline indicator in UI
@@ -864,455 +701,154 @@
                     indicator.style.color = 'white';
                     indicator.innerHTML = '<i class="fas fa-wifi-slash"></i> Offline';
                 }
-            },
-            
-            // Add operation to pending sync queue
-            async addToQueue(action, storeName, data) {
-                const syncItem = {
-                    action: action,
-                    storeName: storeName,
-                    data: data,
-                    timestamp: Date.now(),
-                    status: 'pending',
-                    retryCount: 0
-                };
-                
-                await IndexedDBHelper.saveToStore('pendingSync', syncItem);
-                
-                // Try to sync immediately if online
-                if (this.isOnline && !this.isSyncing) {
-                    this.processQueue();
-                }
-            },
-            
-            // Process pending sync queue with batch processing
-            async processQueue() {
-                if (this.isSyncing || !this.isOnline) return;
-                
-                this.isSyncing = true;
-                
-                try {
-                    const pendingItems = await IndexedDBHelper.getFromStore('pendingSync');
-                    const itemsToSync = pendingItems.filter(item => item.status === 'pending');
-                    
-                    if (itemsToSync.length === 0) {
-                        this.isSyncing = false;
-                        this.updateOnlineIndicator();
-                        return;
-                    }
-                    
-                    this.showSyncingIndicator(itemsToSync.length);
-                    
-                    // Batch processing - process up to 5 items concurrently
-                    const batchSize = 5;
-                    for (let i = 0; i < itemsToSync.length; i += batchSize) {
-                        const batch = itemsToSync.slice(i, i + batchSize);
-                        
-                        // Process batch concurrently
-                        await Promise.allSettled(batch.map(async (item) => {
-                            try {
-                                const result = await this.syncToServer(item);
-                                
-                                if (result.success) {
-                                    await IndexedDBHelper.deleteFromStore('pendingSync', item.syncId);
-                                } else {
-                                    item.retryCount++;
-                                    item.status = item.retryCount >= 3 ? 'failed' : 'pending';
-                                    item.lastError = result.error;
-                                    await IndexedDBHelper.saveToStore('pendingSync', item);
-                                }
-                            } catch (error) {
-                                console.error('Sync error for item:', item, error);
-                                item.retryCount++;
-                                item.status = item.retryCount >= 3 ? 'failed' : 'pending';
-                                item.lastError = error.message;
-                                await IndexedDBHelper.saveToStore('pendingSync', item);
-                            }
-                        }));
-                        
-                        // Update indicator for remaining items
-                        const remaining = itemsToSync.length - (i + batchSize);
-                        if (remaining > 0) {
-                            this.showSyncingIndicator(remaining);
-                        }
-                    }
-                } catch (error) {
-                    console.error('Error processing sync queue:', error);
-                } finally {
-                    this.isSyncing = false;
-                    this.hideSyncingIndicator();
-                }
-            },
-            
-            // Sync single item to server
-            async syncToServer(item) {
-                try {
-                    const method = ['add', 'update', 'save'].some(a => item.action.toLowerCase().includes(a)) ? 'POST' : 'GET';
-                    
-                    const payload = method === 'POST' 
-                        ? { action: item.action, data: item.data }
-                        : { action: item.action, ...item.data };
-                    
-                    const result = await callGoogleScript(method, payload);
-                    
-                    if (result.status === 'success') {
-                        return { success: true };
-                    } else {
-                        return { success: false, error: result.message || 'Unknown error' };
-                    }
-                } catch (error) {
-                    return { success: false, error: error.message };
-                }
-            },
-            
-            // Show syncing indicator with pending count
-            showSyncingIndicator(pendingCount = 0) {
-                let indicator = document.getElementById('syncIndicator');
-                if (indicator && this.isOnline) {
-                    indicator.style.backgroundColor = '#F59E0B';
-                    indicator.innerHTML = `<i class="fas fa-sync fa-spin"></i> Sinkronisasi${pendingCount > 0 ? ` (${pendingCount})` : '...'}`;
-                }
-            },
-            
-            // Hide syncing indicator
-            hideSyncingIndicator() {
-                this.updateOnlineIndicator();
-            },
-            
-            // Get pending count
-            async getPendingCount() {
-                const pending = await IndexedDBHelper.getFromStore('pendingSync');
-                return pending.filter(p => p.status === 'pending').length;
-            },
-            
-            // Force sync all pending items
-            async forceSync() {
-                if (!this.isOnline) {
-                    UI.showNotification('Tidak dapat sinkronisasi. Anda sedang offline.', 'error');
-                    return;
-                }
-                await this.processQueue();
-                UI.showNotification('Sinkronisasi selesai!', 'success');
-            },
-            
-            // Pull data from server and update local
-            async pullFromServer(storeName, action, params = {}) {
-                if (!this.isOnline) {
-                    // Return cached data if offline
-                    return await IndexedDBHelper.getFromStore(storeName);
-                }
-                
-                try {
-                    const result = await callGoogleScript('GET', { action: action, ...params });
-                    
-                    if (result.status === 'success' && result.data) {
-                        // Update local IndexedDB
-                        await IndexedDBHelper.clearStore(storeName);
-                        if (result.data.length > 0) {
-                            await IndexedDBHelper.saveToStore(storeName, result.data);
-                        }
-                        await IndexedDBHelper.updateCacheTimestamp(storeName);
-                        return result.data;
-                    }
-                } catch (error) {
-                    console.error(`Error pulling ${storeName} from server:`, error);
-                }
-                
-                // Fallback to cached data
-                return await IndexedDBHelper.getFromStore(storeName);
             }
         };
 
         // =================================================================
-        // DATA SERVICE - Layer untuk operasi CRUD dengan arsitektur baru
-        // Web App → IndexedDB → Google Apps Script
+        // DATA SERVICE - Direct Google Sheets API (No IndexedDB)
+        // Web App → Google Apps Script (Direct)
         // =================================================================
         const DataService = {
             // ============ USERS ============
-            async getUsers(forceRefresh = false) {
-                await IndexedDBHelper.init();
-                
-                if (!forceRefresh) {
-                    const isValid = await IndexedDBHelper.isCacheValid('users', 5);
-                    if (isValid) {
-                        return await IndexedDBHelper.getFromStore('users');
-                    }
-                }
-                
-                return await SyncManager.pullFromServer('users', 'getUsers');
+            async getUsers() {
+                const result = await callGoogleScript('GET', { action: 'getUsers' });
+                return result.status === 'success' ? result.data : [];
             },
             
             async addUser(userData) {
-                await IndexedDBHelper.init();
-                await IndexedDBHelper.saveToStore('users', userData);
-                await SyncManager.addToQueue('addUser', 'users', userData);
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'addUser', data: userData });
+                return { success: result.status === 'success', message: result.message };
             },
             
             async updateUser(userData) {
-                await IndexedDBHelper.init();
-                await IndexedDBHelper.saveToStore('users', userData);
-                await SyncManager.addToQueue('updateUser', 'users', userData);
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'updateUser', data: userData });
+                return { success: result.status === 'success', message: result.message };
             },
             
             async deleteUser(username) {
-                await IndexedDBHelper.init();
-                await IndexedDBHelper.deleteFromStore('users', username);
-                await SyncManager.addToQueue('deleteUser', 'users', { username: username });
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'deleteUser', data: { username: username } });
+                return { success: result.status === 'success', message: result.message };
             },
             
             // ============ QUESTIONS ============
-            async getQuestions(kode = null, forceRefresh = false) {
-                await IndexedDBHelper.init();
-                
-                if (kode) {
-                    // Get by kode
-                    if (!forceRefresh) {
-                        const cached = await IndexedDBHelper.getByIndex('questions', 'kode', kode);
-                        if (cached && cached.length > 0) return cached;
-                    }
-                    const result = await SyncManager.pullFromServer('questions', 'getQuestions', { kode: kode });
-                    return result || [];
-                }
-                
-                if (!forceRefresh) {
-                    const isValid = await IndexedDBHelper.isCacheValid('questions', 5);
-                    if (isValid) {
-                        return await IndexedDBHelper.getFromStore('questions');
-                    }
-                }
-                
-                return await SyncManager.pullFromServer('questions', 'getQuestions');
+            async getQuestions(kode = null) {
+                const params = kode ? { action: 'getQuestions', kode: kode } : { action: 'getQuestions' };
+                const result = await callGoogleScript('GET', params);
+                return result.status === 'success' ? result.data : [];
             },
             
             async addQuestion(questionData) {
-                await IndexedDBHelper.init();
-                await IndexedDBHelper.saveToStore('questions', questionData);
-                await SyncManager.addToQueue('addQuestion', 'questions', questionData);
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'addQuestion', data: questionData });
+                return { success: result.status === 'success', message: result.message };
             },
             
             async addQuestions(questionsArray) {
-                await IndexedDBHelper.init();
-                await IndexedDBHelper.saveToStore('questions', questionsArray);
-                await SyncManager.addToQueue('addQuestions', 'questions', questionsArray);
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'addQuestions', data: questionsArray });
+                return { success: result.status === 'success', message: result.message };
             },
             
             async updateQuestion(questionData) {
-                await IndexedDBHelper.init();
-                await IndexedDBHelper.saveToStore('questions', questionData);
-                await SyncManager.addToQueue('updateQuestion', 'questions', questionData);
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'updateQuestion', data: questionData });
+                return { success: result.status === 'success', message: result.message };
             },
             
             async deleteQuestion(questionId) {
-                await IndexedDBHelper.init();
-                await IndexedDBHelper.deleteFromStore('questions', questionId);
-                await SyncManager.addToQueue('deleteQuestion', 'questions', { id: questionId });
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'deleteQuestion', data: { id: questionId } });
+                return { success: result.status === 'success', message: result.message };
             },
             
             async deleteQuestions(questionIds) {
-                await IndexedDBHelper.init();
-                for (const id of questionIds) {
-                    await IndexedDBHelper.deleteFromStore('questions', id);
-                }
-                await SyncManager.addToQueue('deleteQuestions', 'questions', { ids: questionIds });
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'deleteQuestions', data: { ids: questionIds } });
+                return { success: result.status === 'success', message: result.message };
             },
             
             // ============ RESULTS ============
-            async getResults(filters = {}, forceRefresh = false) {
-                await IndexedDBHelper.init();
-                
-                if (!forceRefresh) {
-                    const cached = await IndexedDBHelper.getFromStore('results');
-                    if (cached && cached.length > 0) {
-                        // Filter locally
-                        let filtered = cached;
-                        if (filters.namaLengkap) filtered = filtered.filter(r => r.namaLengkap === filters.namaLengkap);
-                        if (filters.kodesoal) filtered = filtered.filter(r => r.kodesoal === filters.kodesoal);
-                        if (filters.kelas) filtered = filtered.filter(r => r.kelas === filters.kelas);
-                        if (filters.mataPelajaran) filtered = filtered.filter(r => r.mataPelajaran === filters.mataPelajaran);
-                        if (filters.tahunAjaran) filtered = filtered.filter(r => r.tahunAjaran === filters.tahunAjaran);
-                        if (filters.semester) filtered = filtered.filter(r => r.semester === filters.semester);
-                        return filtered;
-                    }
-                }
-                
+            async getResults(filters = {}) {
                 const params = { action: 'getResults', ...filters };
                 const result = await callGoogleScript('GET', params);
-                if (result.status === 'success' && result.data) {
-                    await IndexedDBHelper.saveToStore('results', result.data);
-                    return result.data;
-                }
-                return [];
+                return result.status === 'success' ? result.data : [];
             },
             
             async addResults(resultsArray) {
-                await IndexedDBHelper.init();
-                await IndexedDBHelper.saveToStore('results', resultsArray);
-                await SyncManager.addToQueue('addResults', 'results', resultsArray);
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'addResults', data: resultsArray });
+                return { success: result.status === 'success', message: result.message };
             },
             
             async updateResult(resultData) {
-                await IndexedDBHelper.init();
-                const existing = await IndexedDBHelper.getFromStore('results', resultData.resultId);
-                const updated = { ...existing, ...resultData };
-                await IndexedDBHelper.saveToStore('results', updated);
-                await SyncManager.addToQueue('updateResult', 'results', resultData);
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'updateResult', data: resultData });
+                return { success: result.status === 'success', message: result.message };
             },
             
             async deleteResults(filters) {
-                await IndexedDBHelper.init();
-                const all = await IndexedDBHelper.getFromStore('results');
-                let toDelete = all;
-                if (filters.kodesoal) toDelete = toDelete.filter(r => r.kodesoal === filters.kodesoal);
-                if (filters.namaLengkap) toDelete = toDelete.filter(r => r.namaLengkap === filters.namaLengkap);
-                
-                for (const item of toDelete) {
-                    await IndexedDBHelper.deleteFromStore('results', item.resultId);
-                }
-                await SyncManager.addToQueue('deleteResults', 'results', filters);
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'deleteResults', data: filters });
+                return { success: result.status === 'success', message: result.message };
             },
             
             // ============ GRADES ============
-            async getGrades(filters = {}, forceRefresh = false) {
-                await IndexedDBHelper.init();
-                
-                if (!forceRefresh) {
-                    const cached = await IndexedDBHelper.getFromStore('grades');
-                    if (cached && cached.length > 0) {
-                        let filtered = cached;
-                        if (filters.namaSiswa) filtered = filtered.filter(g => g.namaSiswa === filters.namaSiswa);
-                        if (filters.kodeSoal) filtered = filtered.filter(g => g.kodeSoal.toLowerCase().includes(filters.kodeSoal.toLowerCase()));
-                        if (filters.kelas) filtered = filtered.filter(g => g.kelas === filters.kelas);
-                        if (filters.mataPelajaran) filtered = filtered.filter(g => g.mataPelajaran === filters.mataPelajaran);
-                        if (filters.tahunAjaran) filtered = filtered.filter(g => g.tahunAjaran === filters.tahunAjaran);
-                        if (filters.semester) filtered = filtered.filter(g => g.semester === filters.semester);
-                        return filtered;
-                    }
-                }
-                
+            async getGrades(filters = {}) {
                 const params = { action: 'getGrades', ...filters };
                 const result = await callGoogleScript('GET', params);
-                if (result.status === 'success' && result.data) {
-                    await IndexedDBHelper.saveToStore('grades', result.data);
-                    return result.data;
-                }
-                return [];
+                return result.status === 'success' ? result.data : [];
             },
             
             async addGrade(gradeData) {
-                await IndexedDBHelper.init();
-                await IndexedDBHelper.saveToStore('grades', gradeData);
-                await SyncManager.addToQueue('addGrade', 'grades', gradeData);
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'addGrade', data: gradeData });
+                return { success: result.status === 'success', message: result.message };
             },
             
             async updateGrade(gradeData) {
-                await IndexedDBHelper.init();
-                const existing = await IndexedDBHelper.getFromStore('grades', gradeData.gradeId);
-                const updated = { ...existing, ...gradeData };
-                await IndexedDBHelper.saveToStore('grades', updated);
-                await SyncManager.addToQueue('updateGrade', 'grades', gradeData);
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'updateGrade', data: gradeData });
+                return { success: result.status === 'success', message: result.message };
             },
             
             async deleteGrade(gradeId) {
-                await IndexedDBHelper.init();
-                await IndexedDBHelper.deleteFromStore('grades', gradeId);
-                await SyncManager.addToQueue('deleteGrade', 'grades', { gradeId: gradeId });
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'deleteGrade', data: { gradeId: gradeId } });
+                return { success: result.status === 'success', message: result.message };
             },
             
             async deleteGrades(gradeIds) {
-                await IndexedDBHelper.init();
-                for (const id of gradeIds) {
-                    await IndexedDBHelper.deleteFromStore('grades', id);
-                }
-                await SyncManager.addToQueue('deleteGrades', 'grades', { gradeIds: gradeIds });
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'deleteGrades', data: { gradeIds: gradeIds } });
+                return { success: result.status === 'success', message: result.message };
             },
             
             // ============ BLOCKED STUDENTS ============
-            async getBlockedStudents(forceRefresh = false) {
-                await IndexedDBHelper.init();
-                
-                if (!forceRefresh) {
-                    const isValid = await IndexedDBHelper.isCacheValid('blockedStudents', 5);
-                    if (isValid) {
-                        return await IndexedDBHelper.getFromStore('blockedStudents');
-                    }
-                }
-                
-                return await SyncManager.pullFromServer('blockedStudents', 'getBlockedStudents');
+            async getBlockedStudents() {
+                const result = await callGoogleScript('GET', { action: 'getBlockedStudents' });
+                return result.status === 'success' ? result.data : [];
             },
             
             async blockStudent(blockData) {
-                await IndexedDBHelper.init();
-                await IndexedDBHelper.saveToStore('blockedStudents', blockData);
-                await SyncManager.addToQueue('blockStudent', 'blockedStudents', blockData);
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'blockStudent', data: blockData });
+                return { success: result.status === 'success', message: result.message };
             },
             
             async unblockStudent(blockId) {
-                await IndexedDBHelper.init();
-                await IndexedDBHelper.deleteFromStore('blockedStudents', blockId);
-                await SyncManager.addToQueue('unblockStudent', 'blockedStudents', { blockId: blockId });
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'unblockStudent', data: { blockId: blockId } });
+                return { success: result.status === 'success', message: result.message };
             },
             
             async unblockAllStudents() {
-                await IndexedDBHelper.init();
-                await IndexedDBHelper.clearStore('blockedStudents');
-                await SyncManager.addToQueue('unblockAllStudents', 'blockedStudents', {});
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'unblockAllStudents', data: {} });
+                return { success: result.status === 'success', message: result.message };
             },
             
             async isStudentBlocked(username, examCode) {
-                await IndexedDBHelper.init();
-                const blocked = await IndexedDBHelper.getFromStore('blockedStudents');
+                const blocked = await this.getBlockedStudents();
                 return blocked.some(b => b.username === username && b.examCode === examCode);
             },
             
             // ============ SETTINGS ============
             async getSettings(key = 'examConfig') {
-                await IndexedDBHelper.init();
-                
-                // Try local first
-                const cached = await IndexedDBHelper.getFromStore('settings', key);
-                if (cached) return cached;
-                
-                // Fetch from server
-                if (SyncManager.isOnline) {
-                    try {
-                        const result = await callGoogleScript('GET', { action: 'getSettings', key: key });
-                        if (result.status === 'success' && result.data) {
-                            const settings = { key: key, ...result.data, lastUpdated: Date.now() };
-                            await IndexedDBHelper.saveToStore('settings', settings);
-                            return settings;
-                        }
-                    } catch (error) {
-                        console.error('Error fetching settings:', error);
-                    }
+                const result = await callGoogleScript('GET', { action: 'getSettings', key: key });
+                if (result.status === 'success' && result.data) {
+                    return { key: key, ...result.data };
                 }
-                
                 return { key: key, durationMinutes: 60 }; // Default
             },
             
             async saveSettings(settingsData) {
-                await IndexedDBHelper.init();
-                const data = { key: 'examConfig', ...settingsData, lastUpdated: Date.now() };
-                await IndexedDBHelper.saveToStore('settings', data);
-                await SyncManager.addToQueue('saveSettings', 'settings', settingsData);
-                return { success: true };
+                const result = await callGoogleScript('POST', { action: 'saveSettings', data: settingsData });
+                return { success: result.status === 'success', message: result.message };
             }
         };
 
@@ -2458,30 +1994,21 @@
                     try {
                         console.log('[Delete] Deleting question with ID:', id);
                         
-                        // IMMEDIATE: Delete from IndexedDB first for instant UI update
-                        await IndexedDBHelper.deleteFromStore('questions', id);
-                        
                         // Clear cache to ensure UI reflects deletion
                         AppState.cache.clear();
                         
-                        // IMMEDIATE: Refresh UI (don't wait for server)
-                        UI.loadAndRenderPaginatedQuestions(false);
-                        
-                        // BACKGROUND: Sync with Google Sheets (fire and forget)
-                        callGoogleScript('POST', { 
+                        // Delete from server and refresh UI
+                        const serverResult = await callGoogleScript('POST', { 
                             action: 'deleteQuestion', 
                             data: { id: id } 
-                        }).then(serverResult => {
-                            if (serverResult.status === 'success') {
-                                console.log('[Delete] Server sync completed for question:', id);
-                            } else {
-                                console.error('[Delete] Server sync failed:', serverResult.message);
-                                // Optionally show warning that server sync failed
-                                UI.showNotification('Peringatan: Sinkronisasi server tertunda', 'warning');
-                            }
-                        }).catch(error => {
-                            console.error('[Delete] Background server sync error:', error);
                         });
+                        
+                        if (serverResult.status === 'success') {
+                            console.log('[Delete] Question deleted successfully:', id);
+                            UI.loadAndRenderPaginatedQuestions(true);
+                        } else {
+                            throw new Error(serverResult.message || 'Gagal menghapus soal');
+                        }
                         
                     } catch (error) {
                         console.error("Error removing document: ", error);
@@ -2852,7 +2379,7 @@
                     try {
                         console.log('[Delete] Deleting result with ID:', id);
                         
-                        // Delete from server FIRST (synchronous delete)
+                        // Delete from server
                         const serverResult = await callGoogleScript('POST', { 
                             action: 'deleteResult', 
                             data: { resultId: id } 
@@ -2862,21 +2389,14 @@
                             throw new Error(serverResult.message || 'Gagal menghapus dari server');
                         }
                         
-                        // Then delete from IndexedDB
-                        await IndexedDBHelper.deleteFromStore('results', id);
-                        
-                        // Clear ALL caches
+                        // Clear caches
                         AppState.cache.clear();
                         
-                        // Clear IndexedDB store to force fresh fetch
-                        await IndexedDBHelper.clearStore('results');
-                        
-                        // Refresh from server (now consistent)
-                        setTimeout(() => {
-                            UI.loadAndRenderPaginatedResults(true);
-                        }, 100);
+                        // Refresh from server
+                        UI.loadAndRenderPaginatedResults(true);
                     } catch (error) {
                         console.error('Delete error:', error);
+                        UI.showNotification('Gagal menghapus: ' + error.message, 'error');
                     }
                 });
             },
@@ -3113,12 +2633,8 @@
 
             async recalculateFinalGrade(studentName, examCode) {
                 try {
-                    // IMPORTANT: Read DIRECTLY from IndexedDB to get fresh data
-                    // This ensures we get the latest updated values
-                    const allResults = await IndexedDBHelper.getFromStore('results');
-                    const studentResults = allResults.filter(r => 
-                        r.namaLengkap === studentName && r.kodesoal === examCode
-                    );
+                    // Get results from server
+                    const studentResults = await DataService.getResults({ namaLengkap: studentName, kodesoal: examCode });
             
                     if (!studentResults || studentResults.length === 0) {
                         console.warn('No results found for recalculation.');
@@ -3140,8 +2656,8 @@
                     const finalScore = Math.round(totalScore / totalQuestionsForExam);
                     const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     
-                    // Find existing grade - also read directly from IndexedDB
-                    const allGrades = await IndexedDBHelper.getFromStore('grades');
+                    // Find existing grade - read from server
+                    const allGrades = await DataService.getGrades({ namaSiswa: studentName, kodeSoal: examCode });
                     const existingGrades = allGrades.filter(g => 
                         g.namaSiswa === studentName && g.kodeSoal === examCode
                     );
@@ -3167,8 +2683,8 @@
             // Synchronous version that updates server directly (for edit operations)
             async recalculateFinalGradeSync(studentName, examCode) {
                 try {
-                    // Read DIRECTLY from IndexedDB to get fresh data
-                    const allResults = await IndexedDBHelper.getFromStore('results');
+                    // Read from server
+                    const allResults = await DataService.getResults({ namaLengkap: studentName, kodesoal: examCode });
                     const studentResults = allResults.filter(r => 
                         r.namaLengkap === studentName && r.kodesoal === examCode
                     );
@@ -3193,8 +2709,8 @@
                     const finalScore = Math.round(totalScore / totalQuestionsForExam);
                     const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     
-                    // Find existing grade from IndexedDB
-                    const allGrades = await IndexedDBHelper.getFromStore('grades');
+                    // Find existing grade from server
+                    const allGrades = await DataService.getGrades({ namaSiswa: studentName, kodeSoal: examCode });
                     const existingGrades = allGrades.filter(g => 
                         g.namaSiswa === studentName && g.kodeSoal === examCode
                     );
@@ -3202,22 +2718,7 @@
                     if (existingGrades && existingGrades.length > 0) {
                         const existingGrade = existingGrades[0];
                         
-                        // Update to SERVER FIRST (synchronous)
-                        const serverResult = await callGoogleScript('POST', {
-                            action: 'updateGrade',
-                            data: {
-                                gradeId: existingGrade.gradeId,
-                                nilai: finalScore,
-                                grade: grade,
-                                keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
-                            }
-                        });
-                        
-                        if (serverResult.status !== 'success') {
-                            console.error('Failed to sync grade to server:', serverResult.message);
-                        }
-                        
-                        // Then update IndexedDB
+                        // Update to SERVER
                         await DataService.updateGrade({
                             gradeId: existingGrade.gradeId,
                             nilai: finalScore,
@@ -3238,11 +2739,8 @@
             // Async version for background processing (non-blocking)
             async recalculateFinalGradeAsync(studentName, examCode, newNilai) {
                 try {
-                    // Read from IndexedDB
-                    const allResults = await IndexedDBHelper.getFromStore('results');
-                    const studentResults = allResults.filter(r => 
-                        r.namaLengkap === studentName && r.kodesoal === examCode
-                    );
+                    // Read from server
+                    const studentResults = await DataService.getResults({ namaLengkap: studentName, kodesoal: examCode });
             
                     if (!studentResults || studentResults.length === 0) return;
 
@@ -3260,7 +2758,7 @@
                     const finalScore = Math.round(totalScore / totalQuestionsForExam);
                     const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     
-                    const allGrades = await IndexedDBHelper.getFromStore('grades');
+                    const allGrades = await DataService.getGrades({ namaSiswa: studentName, kodeSoal: examCode });
                     const existingGrades = allGrades.filter(g => 
                         g.namaSiswa === studentName && g.kodeSoal === examCode
                     );
@@ -3268,23 +2766,12 @@
                     if (existingGrades && existingGrades.length > 0) {
                         const existingGrade = existingGrades[0];
                         
-                        // Update IndexedDB first
+                        // Update grade to server
                         await DataService.updateGrade({
                             gradeId: existingGrade.gradeId,
                             nilai: finalScore,
                             grade: grade,
                             keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
-                        });
-                        
-                        // Then sync to server
-                        await callGoogleScript('POST', {
-                            action: 'updateGrade',
-                            data: {
-                                gradeId: existingGrade.gradeId,
-                                nilai: finalScore,
-                                grade: grade,
-                                keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
-                            }
                         });
                         
                         AppState.cache.delete('grades');
@@ -3296,7 +2783,7 @@
             },
 
             // =================================================================
-            // Grade Management (DataService - IndexedDB → Google Sheets)
+            // Grade Management (Direct Google Sheets)
             // =================================================================
             async viewGrade(gradeId) {
                 const grades = await DataService.getGrades();
@@ -3377,7 +2864,7 @@
                     try {
                         console.log('[Delete] Deleting grade with ID:', gradeId);
                         
-                        // Delete from server FIRST (synchronous delete)
+                        // Delete from server
                         const serverResult = await callGoogleScript('POST', { 
                             action: 'deleteGrade', 
                             data: { gradeId: gradeId } 
@@ -3387,19 +2874,11 @@
                             throw new Error(serverResult.message || 'Gagal menghapus dari server');
                         }
                         
-                        // Then delete from IndexedDB
-                        await IndexedDBHelper.deleteFromStore('grades', gradeId);
-                        
-                        // Clear ALL caches
+                        // Clear caches
                         AppState.cache.clear();
                         
-                        // Clear IndexedDB store to force fresh fetch
-                        await IndexedDBHelper.clearStore('grades');
-                        
-                        // Refresh from server (now consistent)
-                        setTimeout(() => {
-                            UI.loadAndRenderPaginatedGrades(true);
-                        }, 100);
+                        // Refresh from server
+                        UI.loadAndRenderPaginatedGrades(true);
                     } catch (error) {
                         console.error('Delete error:', error);
                         UI.showNotification('Gagal menghapus nilai: ' + error.message, 'error');
@@ -3616,7 +3095,7 @@
                             // Show loading indicator
                             UI.showNotification('Menghapus soal...', 'info');
                             
-                            // Delete from server FIRST (batch delete)
+                            // Delete from server (batch delete)
                             const serverResult = await callGoogleScript('POST', { 
                                 action: 'deleteQuestionsBatch', 
                                 data: { ids: idsToDelete } 
@@ -3626,23 +3105,13 @@
                                 throw new Error(serverResult.message || 'Gagal menghapus dari server');
                             }
                             
-                            // Then delete from IndexedDB
-                            for (const id of idsToDelete) {
-                                await IndexedDBHelper.deleteFromStore('questions', id);
-                            }
-                            
-                            // Clear ALL caches
+                            // Clear caches
                             AppState.cache.clear();
-                            
-                            // Clear IndexedDB store to force fresh fetch
-                            await IndexedDBHelper.clearStore('questions');
                             
                             UI.showNotification('Soal yang Anda pilih berhasil dihapus!', 'success');
                             
-                            // Refresh from server (now consistent)
-                            setTimeout(() => {
-                                UI.loadAndRenderPaginatedQuestions(true);
-                            }, 100);
+                            // Refresh from server
+                            UI.loadAndRenderPaginatedQuestions(true);
                         } catch (error) {
                             UI.showNotification('Gagal menghapus soal: ' + error.message, 'error');
                             console.error("Error deleting filtered questions: ", error);
@@ -3674,7 +3143,7 @@
                     async () => {
                         const resultIds = resultsToDelete.map(r => r.resultId);
                         try {
-                            // Delete from server FIRST (batch delete)
+                            // Delete from server (batch delete)
                             const serverResult = await callGoogleScript('POST', { 
                                 action: 'deleteResults', 
                                 data: { resultIds: resultIds } 
@@ -3684,23 +3153,14 @@
                                 throw new Error(serverResult.message || 'Gagal menghapus dari server');
                             }
                             
-                            // Then delete from IndexedDB
-                            for (const id of resultIds) {
-                                await IndexedDBHelper.deleteFromStore('results', id);
-                            }
-                            
-                            // Clear ALL caches
+                            // Clear caches
                             AppState.cache.clear();
                             
-                            // Clear IndexedDB store to force fresh fetch
-                            await IndexedDBHelper.clearStore('results');
-                            
-                            // Refresh from server (now consistent)
-                            setTimeout(() => {
-                                UI.loadAndRenderPaginatedResults(true);
-                            }, 100);
+                            // Refresh from server
+                            UI.loadAndRenderPaginatedResults(true);
                         } catch (error) {
                             console.error('Bulk delete error:', error);
+                            UI.showNotification('Gagal menghapus: ' + error.message, 'error');
                         }
                     }
                 );
@@ -3739,23 +3199,14 @@
                                 throw new Error(serverResult.message || 'Gagal menghapus dari server');
                             }
                             
-                            // Then delete from IndexedDB
-                            for (const id of gradeIds) {
-                                await IndexedDBHelper.deleteFromStore('grades', id);
-                            }
-                            
                             // Clear ALL caches
                             AppState.cache.clear();
                             
-                            // Clear IndexedDB store to force fresh fetch
-                            await IndexedDBHelper.clearStore('grades');
-                            
-                            // Refresh from server (now consistent)
-                            setTimeout(() => {
-                                UI.loadAndRenderPaginatedGrades(true);
-                            }, 100);
+                            // Refresh from server
+                            UI.loadAndRenderPaginatedGrades(true);
                         } catch (error) {
                             console.error('Bulk delete error:', error);
+                            UI.showNotification('Gagal menghapus nilai: ' + error.message, 'error');
                         }
                     }
                 );
@@ -3991,13 +3442,6 @@
                 document.getElementById('examInterface').classList.remove('hidden');
                 this.updateUserInfo();
                 
-                // Initialize IndexedDB
-                try {
-                    await IndexedDBHelper.init();
-                } catch (error) {
-                    console.error('Error initializing IndexedDB for exam:', error);
-                }
-                
                 const success = await this.initializeExam(AppState.selectedExamCode);
                 if (!success) {
                     this.showDashboard();
@@ -4181,26 +3625,12 @@
                 const content = document.getElementById('dashboardContent');
                 content.innerHTML = `<div class="text-center p-8"><i class="fas fa-spinner fa-spin text-2xl text-blue-600"></i><p class="mt-2 text-gray-500">Memuat dashboard...</p></div>`;
                 
-                // Initialize IndexedDB and load cached data
+                // Load data from server
                 try {
-                    await IndexedDBHelper.init();
-                    
-                    // Try to load users from cache first for statistics
-                    const cachedUsers = await IndexedDBHelper.getFromStore('users');
-                    if (cachedUsers && cachedUsers.length > 0 && AppState.users.length === 0) {
-                        AppState.users = cachedUsers;
-                    }
-                    
-                    // Sync users in background if cache is old
-                    const isCacheValid = await IndexedDBHelper.isCacheValid('users', 5);
-                    if (!isCacheValid) {
-                        const usersResult = await callGoogleScript('GET', { action: 'getUsers' });
-                        if (usersResult.status === 'success' && usersResult.data) {
-                            AppState.users = usersResult.data;
-                            await IndexedDBHelper.clearStore('users');
-                            await IndexedDBHelper.saveToStore('users', usersResult.data);
-                            await IndexedDBHelper.updateCacheTimestamp('users');
-                        }
+                    // Load users from server
+                    const usersResult = await callGoogleScript('GET', { action: 'getUsers' });
+                    if (usersResult.status === 'success' && usersResult.data) {
+                        AppState.users = usersResult.data;
                     }
                 } catch (error) {
                     console.error('Error loading dashboard data:', error);
@@ -4497,26 +3927,11 @@
                 const content = document.getElementById('dashboardContent');
                 content.innerHTML = `<div class="text-center p-8"><i class="fas fa-spinner fa-spin text-2xl text-blue-600"></i><p class="mt-2 text-gray-500">Memuat data pengguna...</p></div>`;
                 
-                // Initialize IndexedDB and load cached users
+                // Load users from server
                 try {
-                    await IndexedDBHelper.init();
-                    
-                    // Try to load users from cache first
-                    const cachedUsers = await IndexedDBHelper.getFromStore('users');
-                    if (cachedUsers && cachedUsers.length > 0) {
-                        AppState.users = cachedUsers;
-                    }
-                    
-                    // Sync users in background if cache is old
-                    const isCacheValid = await IndexedDBHelper.isCacheValid('users', 5);
-                    if (!isCacheValid) {
-                        const usersResult = await callGoogleScript('GET', { action: 'getUsers' });
-                        if (usersResult.status === 'success' && usersResult.data) {
-                            AppState.users = usersResult.data;
-                            await IndexedDBHelper.clearStore('users');
-                            await IndexedDBHelper.saveToStore('users', usersResult.data);
-                            await IndexedDBHelper.updateCacheTimestamp('users');
-                        }
+                    const usersResult = await callGoogleScript('GET', { action: 'getUsers' });
+                    if (usersResult.status === 'success' && usersResult.data) {
+                        AppState.users = usersResult.data;
                     }
                 } catch (error) {
                     console.error('Error loading users:', error);
@@ -4646,13 +4061,6 @@
                 const content = document.getElementById('dashboardContent');
                 content.innerHTML = `<div class="text-center p-8"><i class="fas fa-spinner fa-spin text-2xl text-blue-600"></i><p class="mt-2 text-gray-500">Memuat manajemen soal...</p></div>`;
                 
-                // Initialize IndexedDB
-                try {
-                    await IndexedDBHelper.init();
-                } catch (error) {
-                    console.error('Error initializing IndexedDB:', error);
-                }
-                
                 const isTeacher = AppState.currentUser.role === 'guru';
                 let classOptions = '';
                 if (isTeacher) {
@@ -4698,12 +4106,6 @@
                 const content = document.getElementById('dashboardContent');
                 content.innerHTML = `<div class="text-center p-8"><i class="fas fa-spinner fa-spin text-2xl text-blue-600"></i><p class="mt-2 text-gray-500">Memuat hasil ujian...</p></div>`;
                 
-                // Initialize IndexedDB
-                try {
-                    await IndexedDBHelper.init();
-                } catch (error) {
-                    console.error('Error initializing IndexedDB:', error);
-                }
                 
                 const isTeacher = AppState.currentUser.role === 'guru';
                 
@@ -4745,12 +4147,6 @@
                 const content = document.getElementById('dashboardContent');
                 content.innerHTML = `<div class="text-center p-8"><i class="fas fa-spinner fa-spin text-2xl text-blue-600"></i><p class="mt-2 text-gray-500">Memuat daftar nilai...</p></div>`;
                 
-                // Initialize IndexedDB
-                try {
-                    await IndexedDBHelper.init();
-                } catch (error) {
-                    console.error('Error initializing IndexedDB:', error);
-                }
                 
                 const isTeacher = AppState.currentUser.role === 'guru';
 
@@ -4791,13 +4187,6 @@
             async showStudentResults() {
                 const content = document.getElementById('dashboardContent');
                 content.innerHTML = `<div class="text-center p-8"><i class="fas fa-spinner fa-spin text-2xl text-blue-600"></i><p class="mt-2 text-gray-500">Memuat hasil ujian...</p></div>`;
-                
-                // Initialize IndexedDB
-                try {
-                    await IndexedDBHelper.init();
-                } catch (error) {
-                    console.error('Error initializing IndexedDB:', error);
-                }
                 
                 content.innerHTML = `
                     <div class="fade-in">
@@ -4871,30 +4260,11 @@
                         const cacheKey = `studentResults_${JSON.stringify(filters)}`;
                         let results = null;
                         
-                        const cachedResults = await IndexedDBHelper.getFromStore('results');
-                        if (cachedResults && cachedResults.length > 0) {
-                            // Filter cached results
-                            results = cachedResults.filter(r => {
-                                if (r.namaLengkap !== AppState.currentUser.nama) return false;
-                                if (filters.tahunAjaran && r.tahunAjaran !== filters.tahunAjaran) return false;
-                                if (filters.semester && r.semester !== filters.semester) return false;
-                                if (filters.mataPelajaran && r.mataPelajaran !== filters.mataPelajaran) return false;
-                                return true;
-                            });
-                            if (results.length > 0) {
-                                this.renderStudentResultsTable(results);
-                            }
-                        }
-                        
-                        // Fetch from network
+                        // Fetch from server directly
                         const result = await callGoogleScript('GET', filters);
                         if (result.status === 'success') {
                             this.renderStudentResultsTable(result.data);
-                            // Update cache
-                            if (result.data && result.data.length > 0) {
-                                await IndexedDBHelper.saveToStore('results', result.data);
-                            }
-                        } else if (!results || results.length === 0) {
+                        } else {
                             throw new Error('Gagal memuat hasil ujian');
                         }
                     } catch (error) {
@@ -4934,13 +4304,6 @@
             async showStudentGrades() {
                 const content = document.getElementById('dashboardContent');
                 content.innerHTML = `<div class="text-center p-8"><i class="fas fa-spinner fa-spin text-2xl text-blue-600"></i><p class="mt-2 text-gray-500">Memuat daftar nilai...</p></div>`;
-                
-                // Initialize IndexedDB
-                try {
-                    await IndexedDBHelper.init();
-                } catch (error) {
-                    console.error('Error initializing IndexedDB:', error);
-                }
                 
                 content.innerHTML = `
                     <div class="fade-in">
@@ -5006,62 +4369,22 @@
                     const mataPelajaran = document.getElementById('filterStudentGradeSubject').value;
                     
                     try {
-                        // SERVER-FIRST: Always fetch from Google Sheets for accurate data
-                        if (SyncManager.isOnline) {
-                            const result = await callGoogleScript('GET', {
-                                action: 'getGrades',
-                                namaSiswa: AppState.currentUser.nama,
-                                tahunAjaran: tahunAjaran,
-                                semester: semester,
-                                mataPelajaran: mataPelajaran
-                            });
+                        // Fetch from Google Sheets directly
+                        const result = await callGoogleScript('GET', {
+                            action: 'getGrades',
+                            namaSiswa: AppState.currentUser.nama,
+                            tahunAjaran: tahunAjaran,
+                            semester: semester,
+                            mataPelajaran: mataPelajaran
+                        });
 
-                            if (result.status === 'success') {
-                                this.renderStudentGradesTable(result.data || []);
-                                // Update cache for offline use
-                                if (result.data && result.data.length > 0) {
-                                    for (const item of result.data) {
-                                        await IndexedDBHelper.saveToStore('grades', item);
-                                    }
-                                }
-                            } else {
-                                throw new Error('Gagal memuat data nilai dari server');
-                            }
+                        if (result.status === 'success') {
+                            this.renderStudentGradesTable(result.data || []);
                         } else {
-                            // OFFLINE FALLBACK
-                            const cachedGrades = await IndexedDBHelper.getFromStore('grades') || [];
-                            const filteredGrades = cachedGrades.filter(g => {
-                                if (g.namaSiswa !== AppState.currentUser.nama) return false;
-                                if (tahunAjaran && g.tahunAjaran !== tahunAjaran) return false;
-                                if (semester && g.semester !== semester) return false;
-                                if (mataPelajaran && g.mataPelajaran !== mataPelajaran) return false;
-                                return true;
-                            });
-                            this.renderStudentGradesTable(filteredGrades);
-                            UI.showNotification('Mode offline - menampilkan data tersimpan', 'info');
+                            throw new Error('Gagal memuat data nilai dari server');
                         }
                     } catch (error) {
                         console.error("Error fetching student grades:", error);
-                        
-                        // Try cache as fallback
-                        try {
-                            const cachedGrades = await IndexedDBHelper.getFromStore('grades') || [];
-                            const filteredGrades = cachedGrades.filter(g => {
-                                if (g.namaSiswa !== AppState.currentUser.nama) return false;
-                                if (tahunAjaran && g.tahunAjaran !== tahunAjaran) return false;
-                                if (semester && g.semester !== semester) return false;
-                                if (mataPelajaran && g.mataPelajaran !== mataPelajaran) return false;
-                                return true;
-                            });
-                            if (filteredGrades.length > 0) {
-                                this.renderStudentGradesTable(filteredGrades);
-                                UI.showNotification('Gagal memuat dari server - menampilkan data tersimpan', 'warning');
-                                return;
-                            }
-                        } catch (cacheError) {
-                            console.error('Cache fallback failed:', cacheError);
-                        }
-                        
                         studentGradesTableBody.innerHTML = '<tr><td colspan="7" class="px-6 py-4 text-center text-red-500"><i class="fas fa-exclamation-triangle mr-2"></i>Gagal memuat data. Periksa koneksi.</td></tr>';
                     }
                 });
@@ -5658,7 +4981,7 @@
             
             async loadAndRenderPaginatedResults(forceRefresh = false) {
                 const resultsTableBody = document.getElementById('resultsTableBody');
-                resultsTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-gray-500"><i class="fas fa-spinner fa-spin mr-2"></i>Memuat data...</td></tr>';
+                resultsTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-gray-500"><i class="fas fa-spinner fa-spin mr-2"></i>Memuat data dari server...</td></tr>';
                 
                 const filters = {
                     action: 'getResults',
@@ -5681,44 +5004,30 @@
 
                 if (!cachedData) {
                     try {
-                        // OFFLINE-FIRST: Read from IndexedDB first
-                        let allResults = await IndexedDBHelper.getFromStore('results');
-                        
-                        // If no data in IndexedDB OR force refresh, fetch from server
-                        if (!allResults || allResults.length === 0 || forceRefresh) {
-                            const result = await callGoogleScript('GET', filters);
-                            if (result.status === 'success') {
-                                // Clear old data from IndexedDB before saving new
-                                if (forceRefresh) {
-                                    await IndexedDBHelper.clearStore('results');
-                                }
-                                
-                                allResults = result.data;
-                                // Save to IndexedDB for future use
-                                for (const item of allResults) {
-                                    await IndexedDBHelper.saveToStore('results', item);
-                                }
-                            } else {
-                                throw new Error(result.message || 'Gagal memuat data.');
-                            }
+                        // Fetch directly from server
+                        const result = await callGoogleScript('GET', filters);
+                        if (result.status === 'success') {
+                            let allResults = result.data || [];
+                            
+                            // Apply filters locally
+                            let filteredResults = allResults.filter(r => {
+                                if (filters.tahunAjaran && r.tahunAjaran !== filters.tahunAjaran) return false;
+                                if (filters.semester && r.semester !== filters.semester) return false;
+                                if (filters.kodesoal && r.kodesoal !== filters.kodesoal) return false;
+                                if (filters.mataPelajaran && r.mataPelajaran !== filters.mataPelajaran) return false;
+                                if (filters.kelas && r.kelas !== filters.kelas) return false;
+                                if (filters.namaLengkap && r.namaLengkap !== filters.namaLengkap) return false;
+                                return true;
+                            });
+                            
+                            filteredResults.sort((a, b) => a.noSoal - b.noSoal);
+                            AppState.cache.set(cacheKey, filteredResults);
+                            cachedData = filteredResults;
+                        } else {
+                            throw new Error(result.message || 'Gagal memuat data.');
                         }
-                        
-                        // Apply filters locally
-                        let filteredResults = allResults.filter(r => {
-                            if (filters.tahunAjaran && r.tahunAjaran !== filters.tahunAjaran) return false;
-                            if (filters.semester && r.semester !== filters.semester) return false;
-                            if (filters.kodesoal && r.kodesoal !== filters.kodesoal) return false;
-                            if (filters.mataPelajaran && r.mataPelajaran !== filters.mataPelajaran) return false;
-                            if (filters.kelas && r.kelas !== filters.kelas) return false;
-                            if (filters.namaLengkap && r.namaLengkap !== filters.namaLengkap) return false;
-                            return true;
-                        });
-                        
-                        filteredResults.sort((a, b) => a.noSoal - b.noSoal);
-                        AppState.cache.set(cacheKey, filteredResults);
-                        cachedData = filteredResults;
                     } catch (error) {
-                        resultsTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-red-500"><i class="fas fa-exclamation-triangle mr-2"></i>Gagal memuat data. Periksa koneksi atau hubungi admin.</td></tr>';
+                        resultsTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-red-500"><i class="fas fa-exclamation-triangle mr-2"></i>Gagal memuat data. Periksa koneksi.</td></tr>';
                         return;
                     }
                 }
