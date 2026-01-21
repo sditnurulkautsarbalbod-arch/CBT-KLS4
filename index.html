@@ -1016,30 +1016,28 @@
             gradeAnswer(studentAnswer, correctAnswer) {
                 const similarity = this.calculateCombinedSimilarity(studentAnswer, correctAnswer);
                 
-                // Konversi similarity ke nilai dengan sedikit toleransi
-                // Jika similarity >= 85%, berikan nilai penuh (toleransi variasi kalimat)
-                // Jika similarity >= 70%, berikan nilai proporsional tinggi
-                // Di bawahnya, nilai proporsional
+                // ATURAN PENILAIAN:
+                // Jika similarity >= 60%, berikan nilai PENUH (100) - toleransi typo
+                // Di bawah 60%, nilai proporsional
                 
                 let nilai;
-                if (similarity >= 90) {
+                if (similarity >= 60) {
+                    // Toleransi typo: 60% kemiripan = 100% nilai
                     nilai = 100;
-                } else if (similarity >= 80) {
-                    nilai = 90 + Math.round((similarity - 80) * 1); // 90-100
-                } else if (similarity >= 70) {
-                    nilai = 75 + Math.round((similarity - 70) * 1.5); // 75-90
                 } else if (similarity >= 50) {
-                    nilai = 50 + Math.round((similarity - 50) * 1.25); // 50-75
+                    // Nilai proporsional 50-99
+                    nilai = 50 + Math.round((similarity - 50) * 3.27); // 50% sim = 50 nilai, 64% sim = 96 nilai
                 } else {
-                    nilai = Math.round(similarity); // 0-50
+                    // Di bawah 50%, nilai proporsional rendah
+                    nilai = Math.round(similarity);
                 }
                 
                 // Generate feedback
                 let feedback;
-                if (nilai >= 90) {
-                    feedback = 'Jawaban sangat tepat dan sesuai dengan kunci jawaban.';
+                if (nilai >= 100) {
+                    feedback = 'Jawaban benar! Sesuai dengan kunci jawaban.';
                 } else if (nilai >= 75) {
-                    feedback = 'Jawaban sudah baik, konsep utama tercakup.';
+                    feedback = 'Jawaban sudah mendekati benar, namun ada sedikit perbedaan.';
                 } else if (nilai >= 50) {
                     feedback = 'Jawaban cukup, beberapa konsep penting sudah disebutkan.';
                 } else if (nilai >= 25) {
@@ -4935,7 +4933,6 @@
             
             async loadAndRenderPaginatedQuestions(forceRefresh = false) {
                 const questionsList = document.getElementById('questionsList');
-                questionsList.innerHTML = `<div class="text-center p-8"><i class="fas fa-spinner fa-spin text-2xl text-blue-600"></i><p class="mt-2 text-gray-600">Memuat soal...</p></div>`;
 
                 const filters = {
                     tahunAjaran: document.getElementById('filterTahunAjaran').value,
@@ -4954,55 +4951,69 @@
                 }
                 
                 let cachedData = AppState.cache.get(cacheKey);
-
-                if (!cachedData) {
-                    try {
-                        // Fetch directly from server
-                        const params = { action: 'getQuestions', ...filters };
-                        const result = await callGoogleScript('GET', params);
-                        
-                        if (result.status === 'success') {
-                            let allQuestions = result.data || [];
-                            
-                            // Apply filters locally
-                            let filteredQuestions = allQuestions.filter(q => {
-                                if (filters.tahunAjaran && q.tahunAjaran !== filters.tahunAjaran) return false;
-                                if (filters.semester && q.semester !== filters.semester) return false;
-                                if (filters.kelas && q.kelas !== filters.kelas) return false;
-                                if (filters.mataPelajaran && q.mataPelajaran !== filters.mataPelajaran) return false;
-                                if (filters.kode && q.kode !== filters.kode) return false;
-                                return true;
-                            });
-                            
-                            // Filter by teacher's grade if applicable
-                            if (AppState.currentUser.role === 'guru' && AppState.currentUser.kelas) {
-                                const teacherGrade = AppState.currentUser.kelas.charAt(0);
-                                filteredQuestions = filteredQuestions.filter(q => q.kelas && q.kelas.startsWith(teacherGrade));
-                            }
-                            
-                            // Sort by type and creation time
-                            const typeOrder = { 'pilihan_ganda': 1, 'isian': 2, 'uraian': 3 };
-                            filteredQuestions.sort((a, b) => {
-                                const typeA = typeOrder[a.tipe] || 99;
-                                const typeB = typeOrder[b.tipe] || 99;
-                                if (typeA !== typeB) return typeA - typeB;
-                                const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-                                const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-                                return timeA - timeB;
-                            });
-                            
-                            cachedData = filteredQuestions;
-                            AppState.cache.set(cacheKey, cachedData);
-                        } else {
-                            throw new Error(result.message || 'Gagal memuat soal.');
-                        }
-                    } catch (error) {
-                        UI.showNotification(error.message || 'Gagal memuat soal.', 'error');
-                        questionsList.innerHTML = '<div class="bg-white rounded-lg shadow p-6 text-center text-red-500">Gagal memuat soal.</div>';
-                        return;
-                    }
+                
+                // SMART CACHE: If cache exists, use it immediately (no loading)
+                if (cachedData && cachedData.length >= 0) {
+                    console.log('[Questions] Using cached data:', cachedData.length, 'items');
+                    this.renderQuestionsFromCache(cachedData);
+                    return;
                 }
 
+                // Show loading only when fetching from server
+                questionsList.innerHTML = `<div class="text-center p-8"><i class="fas fa-spinner fa-spin text-2xl text-blue-600"></i><p class="mt-2 text-gray-600">Memuat soal...</p></div>`;
+
+                try {
+                    // Fetch directly from server
+                    const params = { action: 'getQuestions', ...filters };
+                    const result = await callGoogleScript('GET', params);
+                    
+                    if (result.status === 'success') {
+                        let allQuestions = result.data || [];
+                        
+                        // Apply filters locally
+                        let filteredQuestions = allQuestions.filter(q => {
+                            if (filters.tahunAjaran && q.tahunAjaran !== filters.tahunAjaran) return false;
+                            if (filters.semester && q.semester !== filters.semester) return false;
+                            if (filters.kelas && q.kelas !== filters.kelas) return false;
+                            if (filters.mataPelajaran && q.mataPelajaran !== filters.mataPelajaran) return false;
+                            if (filters.kode && q.kode !== filters.kode) return false;
+                            return true;
+                        });
+                        
+                        // Filter by teacher's grade if applicable
+                        if (AppState.currentUser.role === 'guru' && AppState.currentUser.kelas) {
+                            const teacherGrade = AppState.currentUser.kelas.charAt(0);
+                            filteredQuestions = filteredQuestions.filter(q => q.kelas && q.kelas.startsWith(teacherGrade));
+                        }
+                        
+                        // Sort by type and creation time
+                        const typeOrder = { 'pilihan_ganda': 1, 'isian': 2, 'uraian': 3 };
+                        filteredQuestions.sort((a, b) => {
+                            const typeA = typeOrder[a.tipe] || 99;
+                            const typeB = typeOrder[b.tipe] || 99;
+                            if (typeA !== typeB) return typeA - typeB;
+                            const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+                            const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+                            return timeA - timeB;
+                        });
+                        
+                        cachedData = filteredQuestions;
+                        AppState.cache.set(cacheKey, cachedData);
+                        
+                        this.renderQuestionsFromCache(cachedData);
+                        console.log('[Questions] Loaded', cachedData.length, 'questions from server');
+                    } else {
+                        throw new Error(result.message || 'Gagal memuat soal.');
+                    }
+                } catch (error) {
+                    UI.showNotification(error.message || 'Gagal memuat soal.', 'error');
+                    questionsList.innerHTML = '<div class="bg-white rounded-lg shadow p-6 text-center text-red-500">Gagal memuat soal.</div>';
+                    return;
+                }
+            },
+            
+            // Helper function to render questions from cache
+            renderQuestionsFromCache(cachedData) {
                 AppState.pagination.questions.totalItems = cachedData.length;
                 const start = (AppState.pagination.questions.currentPage - 1) * AppState.itemsPerPage;
                 const end = start + AppState.itemsPerPage;
@@ -5018,7 +5029,6 @@
             
             async loadAndRenderPaginatedResults(forceRefresh = false) {
                 const resultsTableBody = document.getElementById('resultsTableBody');
-                resultsTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-gray-500"><i class="fas fa-spinner fa-spin mr-2"></i>Memuat data dari server...</td></tr>';
                 
                 const filters = {
                     action: 'getResults',
@@ -5038,37 +5048,50 @@
                 }
                 
                 let cachedData = AppState.cache.get(cacheKey);
-
-                if (!cachedData) {
-                    try {
-                        // Fetch directly from server
-                        const result = await callGoogleScript('GET', filters);
-                        if (result.status === 'success') {
-                            let allResults = result.data || [];
-                            
-                            // Apply filters locally
-                            let filteredResults = allResults.filter(r => {
-                                if (filters.tahunAjaran && r.tahunAjaran !== filters.tahunAjaran) return false;
-                                if (filters.semester && r.semester !== filters.semester) return false;
-                                if (filters.kodesoal && r.kodesoal !== filters.kodesoal) return false;
-                                if (filters.mataPelajaran && r.mataPelajaran !== filters.mataPelajaran) return false;
-                                if (filters.kelas && r.kelas !== filters.kelas) return false;
-                                if (filters.namaLengkap && r.namaLengkap !== filters.namaLengkap) return false;
-                                return true;
-                            });
-                            
-                            filteredResults.sort((a, b) => a.noSoal - b.noSoal);
-                            AppState.cache.set(cacheKey, filteredResults);
-                            cachedData = filteredResults;
-                        } else {
-                            throw new Error(result.message || 'Gagal memuat data.');
-                        }
-                    } catch (error) {
-                        resultsTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-red-500"><i class="fas fa-exclamation-triangle mr-2"></i>Gagal memuat data. Periksa koneksi.</td></tr>';
-                        return;
-                    }
-                }
                 
+                // SMART CACHE: If cache exists, use it immediately (no loading)
+                if (cachedData && cachedData.length >= 0) {
+                    console.log('[Results] Using cached data:', cachedData.length, 'items');
+                    this.renderResultsFromCache(cachedData);
+                    return;
+                }
+
+                // Show loading only when fetching from server
+                resultsTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-gray-500"><i class="fas fa-spinner fa-spin mr-2"></i>Memuat data...</td></tr>';
+
+                try {
+                    // Fetch directly from server
+                    const result = await callGoogleScript('GET', filters);
+                    if (result.status === 'success') {
+                        let allResults = result.data || [];
+                        
+                        // Apply filters locally
+                        let filteredResults = allResults.filter(r => {
+                            if (filters.tahunAjaran && r.tahunAjaran !== filters.tahunAjaran) return false;
+                            if (filters.semester && r.semester !== filters.semester) return false;
+                            if (filters.kodesoal && r.kodesoal !== filters.kodesoal) return false;
+                            if (filters.mataPelajaran && r.mataPelajaran !== filters.mataPelajaran) return false;
+                            if (filters.kelas && r.kelas !== filters.kelas) return false;
+                            if (filters.namaLengkap && r.namaLengkap !== filters.namaLengkap) return false;
+                            return true;
+                        });
+                        
+                        filteredResults.sort((a, b) => a.noSoal - b.noSoal);
+                        AppState.cache.set(cacheKey, filteredResults);
+                        
+                        this.renderResultsFromCache(filteredResults);
+                        console.log('[Results] Loaded', filteredResults.length, 'results from server');
+                    } else {
+                        throw new Error(result.message || 'Gagal memuat data.');
+                    }
+                } catch (error) {
+                    resultsTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-red-500"><i class="fas fa-exclamation-triangle mr-2"></i>Gagal memuat data. Periksa koneksi.</td></tr>';
+                    return;
+                }
+            },
+            
+            // Helper function to render results from cache
+            renderResultsFromCache(cachedData) {
                 AppState.pagination.results.totalItems = cachedData.length;
                 const start = (AppState.pagination.results.currentPage - 1) * AppState.itemsPerPage;
                 const end = start + AppState.itemsPerPage;
@@ -5084,7 +5107,6 @@
 
             async loadAndRenderPaginatedGrades(forceRefresh = false) {
                 const gradesTableBody = document.getElementById('gradesTableBody');
-                gradesTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-gray-500"><i class="fas fa-spinner fa-spin mr-2"></i>Memuat data nilai dari server...</td></tr>';
 
                 const filters = {
                     tahunAjaran: document.getElementById('filterGradeTahunAjaran').value,
@@ -5098,55 +5120,76 @@
 
                 const cacheKey = AppState.cache.generateKey('grades', filters);
                 
-                // Always clear cache to ensure fresh data
-                AppState.cache.delete(cacheKey);
+                // SMART CACHE: Only clear if forceRefresh
+                if (forceRefresh) {
+                    AppState.cache.delete(cacheKey);
+                }
                 
-                let allGrades = [];
+                // Check cache first
+                let cachedData = AppState.cache.get(cacheKey);
+                
+                // If cache exists, use it immediately (no loading spinner)
+                if (cachedData && cachedData.length >= 0) {
+                    console.log('[Grades] Using cached data:', cachedData.length, 'items');
+                    this.renderGradesFromCache(cachedData, filters);
+                    return;
+                }
+                
+                // Show loading only when fetching from server
+                gradesTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-gray-500"><i class="fas fa-spinner fa-spin mr-2"></i>Memuat data nilai...</td></tr>';
 
                 try {
-                    // Fetch directly from Google Sheets
-                    console.log('[Grades] Fetching fresh data from server...');
+                    // Fetch from Google Sheets
+                    console.log('[Grades] Fetching data from server...');
                     const result = await callGoogleScript('GET', {
                         action: 'getGrades',
                         ...filters
                     });
 
                     if (result.status === 'success') {
-                        allGrades = result.data || [];
-                        console.log(`[Grades] Loaded ${allGrades.length} grades from server`);
+                        let allGrades = result.data || [];
+                        
+                        // Apply filters locally
+                        let filteredGrades = allGrades.filter(g => {
+                            if (filters.tahunAjaran && g.tahunAjaran !== filters.tahunAjaran) return false;
+                            if (filters.semester && g.semester !== filters.semester) return false;
+                            if (filters.kodeSoal && g.kodeSoal !== filters.kodeSoal) return false;
+                            if (filters.mataPelajaran && g.mataPelajaran !== filters.mataPelajaran) return false;
+                            if (filters.kelas && g.kelas !== filters.kelas) return false;
+                            if (filters.namaSiswa && g.namaSiswa !== filters.namaSiswa) return false;
+                            return true;
+                        });
+                        
+                        filteredGrades.sort((a, b) => a.namaSiswa.localeCompare(b.namaSiswa));
+                        
+                        // Save to cache
+                        AppState.cache.set(cacheKey, filteredGrades);
+                        
+                        // Render
+                        this.renderGradesFromCache(filteredGrades, filters);
+                        console.log(`[Grades] Loaded ${filteredGrades.length} grades from server`);
                     } else {
                         throw new Error(result.message || 'Gagal memuat data nilai dari server');
                     }
-                    
-                    // Apply filters locally (in case server returned all data)
-                    let filteredGrades = allGrades.filter(g => {
-                        if (filters.tahunAjaran && g.tahunAjaran !== filters.tahunAjaran) return false;
-                        if (filters.semester && g.semester !== filters.semester) return false;
-                        if (filters.kodeSoal && g.kodeSoal !== filters.kodeSoal) return false;
-                        if (filters.mataPelajaran && g.mataPelajaran !== filters.mataPelajaran) return false;
-                        if (filters.kelas && g.kelas !== filters.kelas) return false;
-                        if (filters.namaSiswa && g.namaSiswa !== filters.namaSiswa) return false;
-                        return true;
-                    });
-                    
-                    filteredGrades.sort((a, b) => a.namaSiswa.localeCompare(b.namaSiswa));
-                    AppState.cache.set(cacheKey, filteredGrades);
-
-                    AppState.pagination.grades.totalItems = filteredGrades.length;
-                    const start = (AppState.pagination.grades.currentPage - 1) * AppState.itemsPerPage;
-                    const end = start + AppState.itemsPerPage;
-                    const paginatedItems = filteredGrades.slice(start, end);
-
-                    Management.renderFilteredGrades(paginatedItems);
-
-                    UI.renderPaginationControls('gradesPagination', AppState.pagination.grades, (newPage) => {
-                        AppState.pagination.grades.currentPage = newPage;
-                        this.loadAndRenderPaginatedGrades();
-                    });
                 } catch (error) {
                     console.error("Error fetching grades:", error);
-                    gradesTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-red-500"><i class="fas fa-exclamation-triangle mr-2"></i>Gagal memuat data. Periksa koneksi dan coba lagi.</td></tr>';
+                    gradesTableBody.innerHTML = '<tr><td colspan="10" class="px-6 py-4 text-center text-red-500"><i class="fas fa-exclamation-triangle mr-2"></i>Gagal memuat data. Periksa koneksi.</td></tr>';
                 }
+            },
+            
+            // Helper function to render grades from cache
+            renderGradesFromCache(filteredGrades, filters) {
+                AppState.pagination.grades.totalItems = filteredGrades.length;
+                const start = (AppState.pagination.grades.currentPage - 1) * AppState.itemsPerPage;
+                const end = start + AppState.itemsPerPage;
+                const paginatedItems = filteredGrades.slice(start, end);
+
+                Management.renderFilteredGrades(paginatedItems);
+
+                UI.renderPaginationControls('gradesPagination', AppState.pagination.grades, (newPage) => {
+                    AppState.pagination.grades.currentPage = newPage;
+                    this.loadAndRenderPaginatedGrades();
+                });
             },
 
             // Fungsi untuk refresh data grades dari server secara manual
