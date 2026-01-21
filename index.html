@@ -1377,21 +1377,56 @@
                         userData.kelas = '';
                     }
                     
+                    // OPTIMISTIC UI: Update local state immediately
                     const index = AppState.users.findIndex(u => u.id == userData.id);
                     if (index !== -1) {
                         AppState.users[index] = { ...AppState.users[index], ...userData };
                         UI.hideModal();
                         UI.showUserManagement();
-                        UI.showNotification('Pengguna berhasil diupdate! Perubahan hanya bersifat lokal.', 'success');
+                        
+                        // BACKGROUND: Sync to server (fire and forget)
+                        callGoogleScript('POST', { 
+                            action: 'updateUser', 
+                            data: userData 
+                        }).then(result => {
+                            if (result.status !== 'success') {
+                                console.error('[Sync] Update user failed:', result.message);
+                                UI.showNotification('Gagal sync ke server', 'warning');
+                            }
+                        }).catch(err => {
+                            console.error('[Sync] Update user error:', err);
+                            UI.showNotification('Gagal sync ke server', 'warning');
+                        });
+                    }
                     }
                 });
             },
 
             deleteUser(id) {
-                UI.showConfirmModal('Konfirmasi Hapus', 'Apakah Anda yakin ingin menghapus pengguna ini? Perubahan hanya bersifat lokal.', () => {
+                UI.showConfirmModal('Konfirmasi Hapus', 'Apakah Anda yakin ingin menghapus pengguna ini?', () => {
+                    // Get username before removing
+                    const userToDelete = AppState.users.find(u => u.id == id);
+                    const username = userToDelete ? userToDelete.username : null;
+                    
+                    // OPTIMISTIC UI: Remove from local state immediately
                     AppState.users = AppState.users.filter(u => u.id != id);
                     UI.showUserManagement();
-                    UI.showNotification('Pengguna berhasil dihapus secara lokal!', 'success');
+                    
+                    // BACKGROUND: Sync to server (fire and forget)
+                    if (username) {
+                        callGoogleScript('POST', { 
+                            action: 'deleteUser', 
+                            data: { username: username } 
+                        }).then(result => {
+                            if (result.status !== 'success') {
+                                console.error('[Sync] Delete user failed:', result.message);
+                                UI.showNotification('Gagal sync hapus ke server', 'warning');
+                            }
+                        }).catch(err => {
+                            console.error('[Sync] Delete user error:', err);
+                            UI.showNotification('Gagal sync hapus ke server', 'warning');
+                        });
+                    }
                 });
             },
 
@@ -1991,29 +2026,28 @@
 
             deleteQuestion(id) {
                 UI.showConfirmModal('Konfirmasi Hapus', 'Apakah Anda yakin ingin menghapus soal ini?', async () => {
-                    try {
-                        console.log('[Delete] Deleting question with ID:', id);
-                        
-                        // Clear cache to ensure UI reflects deletion
-                        AppState.cache.clear();
-                        
-                        // Delete from server and refresh UI
-                        const serverResult = await callGoogleScript('POST', { 
-                            action: 'deleteQuestion', 
-                            data: { id: id } 
-                        });
-                        
+                    console.log('[Delete] Deleting question with ID:', id);
+                    
+                    // OPTIMISTIC UI: Clear cache and refresh immediately
+                    AppState.cache.clear();
+                    UI.loadAndRenderPaginatedQuestions(false);
+                    
+                    // BACKGROUND: Delete from server (fire and forget)
+                    callGoogleScript('POST', { 
+                        action: 'deleteQuestion', 
+                        data: { id: id } 
+                    }).then(serverResult => {
                         if (serverResult.status === 'success') {
                             console.log('[Delete] Question deleted successfully:', id);
-                            UI.loadAndRenderPaginatedQuestions(true);
                         } else {
-                            throw new Error(serverResult.message || 'Gagal menghapus soal');
+                            console.error('[Sync] Delete failed:', serverResult.message);
+                            UI.showNotification('Gagal sync hapus ke server', 'warning');
+                            UI.loadAndRenderPaginatedQuestions(true);
                         }
-                        
-                    } catch (error) {
-                        console.error("Error removing document: ", error);
-                        UI.showNotification('Gagal menghapus soal: ' + error.message, 'error');
-                    }
+                    }).catch(err => {
+                        console.error('[Sync] Delete error:', err);
+                        UI.showNotification('Gagal sync hapus ke server', 'warning');
+                    });
                 });
             },
 
@@ -2334,70 +2368,81 @@
                     const newNilai = parseInt(form.nilai.value);
                     const newStatus = newNilai > 0 ? 'benar' : 'salah';
                     
-                    try {
-                        // OPTIMISTIC UPDATE: Update IndexedDB first (instant)
-                        await DataService.updateResult({
-                            resultId: resultId,
-                            nilai: newNilai,
-                            status: newStatus
-                        });
-                        
-                        AppState.cache.clear();
-                        
-                        // Close modal immediately (instant feedback)
-                        UI.hideModal();
-                        document.getElementById('applyResultFilterBtn').click();
-                        
-                        // Sync to server in background (non-blocking)
-                        console.log('[Sync] Starting background sync to server...');
-                        
-                        Promise.all([
-                            callGoogleScript('POST', {
-                                action: 'updateResult',
-                                data: { resultId: resultId, nilai: newNilai, status: newStatus }
-                            }),
-                            this.recalculateFinalGradeAsync(result.namaLengkap, result.kodesoal, newNilai)
-                        ]).then(([resultResponse, gradeResponse]) => {
-                            console.log('[Sync] Result response:', resultResponse);
-                            if (resultResponse && resultResponse.status === 'success') {
-                                console.log('[Sync] ✓ Background sync completed successfully');
-                            } else {
-                                console.error('[Sync] ✗ Background sync failed:', resultResponse);
-                            }
-                        }).catch(err => {
-                            console.error('[Sync] ✗ Background sync error:', err);
-                        });
-                        
-                    } catch (error) {
-                        console.error("Error updating grade: ", error);
+                    // OPTIMISTIC UI: Close modal & update UI immediately
+                    UI.hideModal();
+                    
+                    // Update cache immediately for instant UI
+                    const cachedResults = AppState.cache.get(cacheKey);
+                    if (cachedResults) {
+                        const idx = cachedResults.findIndex(r => r.resultId === resultId);
+                        if (idx !== -1) {
+                            cachedResults[idx].nilai = newNilai;
+                            cachedResults[idx].status = newStatus;
+                        }
                     }
+                    
+                    // Refresh UI instantly (from updated cache)
+                    document.getElementById('applyResultFilterBtn').click();
+                    
+                    // BACKGROUND: Sync to server (fire and forget)
+                    callGoogleScript('POST', {
+                        action: 'updateResult',
+                        data: { resultId: resultId, nilai: newNilai, status: newStatus }
+                    }).then(response => {
+                        if (response.status === 'success') {
+                            console.log('[Sync] Result updated on server');
+                            // Recalculate grade in background
+                            this.recalculateFinalGradeAsync(result.namaLengkap, result.kodesoal, newNilai);
+                        } else {
+                            console.error('[Sync] Failed:', response.message);
+                            UI.showNotification('Gagal sync ke server', 'warning');
+                        }
+                    }).catch(err => {
+                        console.error('[Sync] Error:', err);
+                        UI.showNotification('Gagal sync ke server', 'warning');
+                    });
                 });
             },
             
             deleteResult(id) {
                 UI.showConfirmModal('Konfirmasi Hapus', 'Apakah Anda yakin ingin menghapus detail hasil ini?', async () => {
-                    try {
-                        console.log('[Delete] Deleting result with ID:', id);
-                        
-                        // Delete from server
-                        const serverResult = await callGoogleScript('POST', { 
-                            action: 'deleteResult', 
-                            data: { resultId: id } 
-                        });
-                        
-                        if (serverResult.status !== 'success') {
-                            throw new Error(serverResult.message || 'Gagal menghapus dari server');
-                        }
-                        
-                        // Clear caches
-                        AppState.cache.clear();
-                        
-                        // Refresh from server
-                        UI.loadAndRenderPaginatedResults(true);
-                    } catch (error) {
-                        console.error('Delete error:', error);
-                        UI.showNotification('Gagal menghapus: ' + error.message, 'error');
+                    console.log('[Delete] Deleting result with ID:', id);
+                    
+                    // OPTIMISTIC UI: Remove from cache immediately
+                    const filters = {
+                        action: 'getResults',
+                        tahunAjaran: document.getElementById('filterResultTahunAjaran').value,
+                        semester: document.getElementById('filterResultSemester').value,
+                        kodesoal: document.getElementById('filterResultCode').value,
+                        mataPelajaran: document.getElementById('filterResultSubject').value,
+                        kelas: document.getElementById('filterResultClass').value,
+                        namaLengkap: document.getElementById('filterResultStudent').value,
+                    };
+                    const cacheKey = AppState.cache.generateKey('results', filters);
+                    const cachedResults = AppState.cache.get(cacheKey);
+                    if (cachedResults) {
+                        const idx = cachedResults.findIndex(r => r.resultId === id);
+                        if (idx !== -1) cachedResults.splice(idx, 1);
                     }
+                    
+                    // Refresh UI instantly
+                    UI.loadAndRenderPaginatedResults(false);
+                    
+                    // BACKGROUND: Delete from server (fire and forget)
+                    callGoogleScript('POST', { 
+                        action: 'deleteResult', 
+                        data: { resultId: id } 
+                    }).then(serverResult => {
+                        if (serverResult.status !== 'success') {
+                            console.error('[Sync] Delete failed:', serverResult.message);
+                            UI.showNotification('Gagal sync hapus ke server', 'warning');
+                            // Refresh to get actual state
+                            UI.loadAndRenderPaginatedResults(true);
+                        }
+                    }).catch(err => {
+                        console.error('[Sync] Delete error:', err);
+                        UI.showNotification('Gagal sync hapus ke server', 'warning');
+                    });
                 });
             },
 
@@ -2843,46 +2888,56 @@
                     const newGrade = newNilai >= 90 ? 'A' : newNilai >= 80 ? 'B' : newNilai >= 70 ? 'C' : newNilai >= 60 ? 'D' : 'E';
                     const newKeterangan = newNilai >= 70 ? 'Lulus' : 'Tidak Lulus';
 
-                    try {
-                        await DataService.updateGrade({
+                    // OPTIMISTIC UI: Close modal immediately
+                    UI.hideModal();
+                    
+                    // Clear cache and refresh UI instantly
+                    AppState.cache.clear();
+                    document.getElementById('applyGradeFilterBtn').click();
+                    
+                    // BACKGROUND: Sync to server (fire and forget)
+                    callGoogleScript('POST', {
+                        action: 'updateGrade',
+                        data: {
                             gradeId: gradeId,
                             nilai: newNilai,
                             grade: newGrade,
                             keterangan: newKeterangan
-                        });
-                        AppState.cache.clear();
-                        UI.hideModal();
-                        document.getElementById('applyGradeFilterBtn').click();
-                    } catch (error) {
-                        console.error('Error updating grade:', error);
-                    }
+                        }
+                    }).then(response => {
+                        if (response.status !== 'success') {
+                            console.error('[Sync] Failed:', response.message);
+                            UI.showNotification('Gagal sync ke server', 'warning');
+                        }
+                    }).catch(err => {
+                        console.error('[Sync] Error:', err);
+                        UI.showNotification('Gagal sync ke server', 'warning');
+                    });
                 });
             },
 
             deleteGrade(gradeId) {
                 UI.showConfirmModal('Konfirmasi Hapus', 'Apakah Anda yakin ingin menghapus data nilai ini?', async () => {
-                    try {
-                        console.log('[Delete] Deleting grade with ID:', gradeId);
-                        
-                        // Delete from server
-                        const serverResult = await callGoogleScript('POST', { 
-                            action: 'deleteGrade', 
-                            data: { gradeId: gradeId } 
-                        });
-                        
+                    console.log('[Delete] Deleting grade with ID:', gradeId);
+                    
+                    // OPTIMISTIC UI: Clear cache and refresh immediately
+                    AppState.cache.clear();
+                    UI.loadAndRenderPaginatedGrades(false);
+                    
+                    // BACKGROUND: Delete from server (fire and forget)
+                    callGoogleScript('POST', { 
+                        action: 'deleteGrade', 
+                        data: { gradeId: gradeId } 
+                    }).then(serverResult => {
                         if (serverResult.status !== 'success') {
-                            throw new Error(serverResult.message || 'Gagal menghapus dari server');
+                            console.error('[Sync] Delete failed:', serverResult.message);
+                            UI.showNotification('Gagal sync hapus ke server', 'warning');
+                            UI.loadAndRenderPaginatedGrades(true);
                         }
-                        
-                        // Clear caches
-                        AppState.cache.clear();
-                        
-                        // Refresh from server
-                        UI.loadAndRenderPaginatedGrades(true);
-                    } catch (error) {
-                        console.error('Delete error:', error);
-                        UI.showNotification('Gagal menghapus nilai: ' + error.message, 'error');
-                    }
+                    }).catch(err => {
+                        console.error('[Sync] Delete error:', err);
+                        UI.showNotification('Gagal sync hapus ke server', 'warning');
+                    });
                 });
             },
 
@@ -3091,31 +3146,27 @@
                     `Anda akan menghapus **${questionsToDelete.length}** soal secara permanen. Aksi ini tidak dapat dibatalkan. Lanjutkan?`, 
                     async () => {
                         const idsToDelete = questionsToDelete.map(q => q.id);
-                        try {
-                            // Show loading indicator
-                            UI.showNotification('Menghapus soal...', 'info');
-                            
-                            // Delete from server (batch delete)
-                            const serverResult = await callGoogleScript('POST', { 
-                                action: 'deleteQuestionsBatch', 
-                                data: { ids: idsToDelete } 
-                            });
-                            
-                            if (serverResult.status !== 'success') {
-                                throw new Error(serverResult.message || 'Gagal menghapus dari server');
+                        
+                        // OPTIMISTIC UI: Clear cache and refresh immediately
+                        AppState.cache.clear();
+                        UI.loadAndRenderPaginatedQuestions(false);
+                        
+                        // BACKGROUND: Delete from server (fire and forget)
+                        callGoogleScript('POST', { 
+                            action: 'deleteQuestionsBatch', 
+                            data: { ids: idsToDelete } 
+                        }).then(serverResult => {
+                            if (serverResult.status === 'success') {
+                                UI.showNotification('Soal berhasil dihapus!', 'success');
+                            } else {
+                                console.error('[Sync] Bulk delete failed:', serverResult.message);
+                                UI.showNotification('Gagal sync hapus ke server', 'warning');
+                                UI.loadAndRenderPaginatedQuestions(true);
                             }
-                            
-                            // Clear caches
-                            AppState.cache.clear();
-                            
-                            UI.showNotification('Soal yang Anda pilih berhasil dihapus!', 'success');
-                            
-                            // Refresh from server
-                            UI.loadAndRenderPaginatedQuestions(true);
-                        } catch (error) {
-                            UI.showNotification('Gagal menghapus soal: ' + error.message, 'error');
-                            console.error("Error deleting filtered questions: ", error);
-                        }
+                        }).catch(err => {
+                            console.error('[Sync] Bulk delete error:', err);
+                            UI.showNotification('Gagal sync hapus ke server', 'warning');
+                        });
                     }
                 );
             },
@@ -3142,26 +3193,27 @@
                     `Anda akan menghapus **${resultsToDelete.length}** data hasil ujian secara permanen. Lanjutkan?`, 
                     async () => {
                         const resultIds = resultsToDelete.map(r => r.resultId);
-                        try {
-                            // Delete from server (batch delete)
-                            const serverResult = await callGoogleScript('POST', { 
-                                action: 'deleteResults', 
-                                data: { resultIds: resultIds } 
-                            });
-                            
-                            if (serverResult.status !== 'success') {
-                                throw new Error(serverResult.message || 'Gagal menghapus dari server');
+                        
+                        // OPTIMISTIC UI: Clear cache and refresh immediately
+                        AppState.cache.clear();
+                        UI.loadAndRenderPaginatedResults(false);
+                        
+                        // BACKGROUND: Delete from server (fire and forget)
+                        callGoogleScript('POST', { 
+                            action: 'deleteResults', 
+                            data: { resultIds: resultIds } 
+                        }).then(serverResult => {
+                            if (serverResult.status === 'success') {
+                                UI.showNotification('Hasil ujian berhasil dihapus!', 'success');
+                            } else {
+                                console.error('[Sync] Bulk delete failed:', serverResult.message);
+                                UI.showNotification('Gagal sync hapus ke server', 'warning');
+                                UI.loadAndRenderPaginatedResults(true);
                             }
-                            
-                            // Clear caches
-                            AppState.cache.clear();
-                            
-                            // Refresh from server
-                            UI.loadAndRenderPaginatedResults(true);
-                        } catch (error) {
-                            console.error('Bulk delete error:', error);
-                            UI.showNotification('Gagal menghapus: ' + error.message, 'error');
-                        }
+                        }).catch(err => {
+                            console.error('[Sync] Bulk delete error:', err);
+                            UI.showNotification('Gagal sync hapus ke server', 'warning');
+                        });
                     }
                 );
             },
@@ -3186,28 +3238,28 @@
                     'Konfirmasi Hapus Massal', 
                     `Anda akan menghapus **${gradesToDelete.length}** data nilai secara permanen. Aksi ini tidak dapat dibatalkan. Lanjutkan?`, 
                     async () => {
-                        try {
-                            const gradeIds = gradesToDelete.map(g => g.gradeId);
-                            
-                            // Delete from server FIRST (batch delete)
-                            const serverResult = await callGoogleScript('POST', { 
-                                action: 'deleteGrades', 
-                                data: { gradeIds: gradeIds } 
-                            });
-                            
-                            if (serverResult.status !== 'success') {
-                                throw new Error(serverResult.message || 'Gagal menghapus dari server');
+                        const gradeIds = gradesToDelete.map(g => g.gradeId);
+                        
+                        // OPTIMISTIC UI: Clear cache and refresh immediately
+                        AppState.cache.clear();
+                        UI.loadAndRenderPaginatedGrades(false);
+                        
+                        // BACKGROUND: Delete from server (fire and forget)
+                        callGoogleScript('POST', { 
+                            action: 'deleteGrades', 
+                            data: { gradeIds: gradeIds } 
+                        }).then(serverResult => {
+                            if (serverResult.status === 'success') {
+                                UI.showNotification('Nilai berhasil dihapus!', 'success');
+                            } else {
+                                console.error('[Sync] Bulk delete failed:', serverResult.message);
+                                UI.showNotification('Gagal sync hapus ke server', 'warning');
+                                UI.loadAndRenderPaginatedGrades(true);
                             }
-                            
-                            // Clear ALL caches
-                            AppState.cache.clear();
-                            
-                            // Refresh from server
-                            UI.loadAndRenderPaginatedGrades(true);
-                        } catch (error) {
-                            console.error('Bulk delete error:', error);
-                            UI.showNotification('Gagal menghapus nilai: ' + error.message, 'error');
-                        }
+                        }).catch(err => {
+                            console.error('[Sync] Bulk delete error:', err);
+                            UI.showNotification('Gagal sync hapus ke server', 'warning');
+                        });
                     }
                 );
             }
