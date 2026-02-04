@@ -556,10 +556,10 @@
      <!-- Exam Lock Screen Modal -->
     <div id="examLockModal" class="fixed inset-0 bg-gray-900 bg-opacity-95 hidden flex items-center justify-center z-50">
         <div class="bg-white rounded-lg shadow-2xl w-full max-w-lg p-8 text-center fade-in">
-            <i class="fas fa-lock text-5xl text-blue-600 mb-6"></i>
-            <h3 class="text-2xl font-bold text-gray-900 mb-4">Mode Ujian Terkunci</h3>
-            <p class="text-gray-700 mb-2">Anda akan memasuki mode ujian layar penuh.</p>
-            <ul class="text-sm text-left text-gray-600 list-disc list-inside mb-8 space-y-2 p-4 bg-gray-50 rounded-lg">
+            <i id="examLockIcon" class="fas fa-lock text-5xl text-blue-600 mb-6"></i>
+            <h3 id="examLockTitle" class="text-2xl font-bold text-gray-900 mb-4">Mode Ujian Terkunci</h3>
+            <p id="examLockDesc" class="text-gray-700 mb-2">Anda akan memasuki mode ujian layar penuh.</p>
+            <ul id="examLockRules" class="text-sm text-left text-gray-600 list-disc list-inside mb-8 space-y-2 p-4 bg-gray-50 rounded-lg">
                 <li>Pastikan tidak ada aplikasi atau jendela lain yang terbuka.</li>
                 <li>Dilarang meninggalkan halaman ujian atau keluar dari mode layar penuh.</li>
             </ul>
@@ -657,8 +657,457 @@
         import { GoogleGenAI, Type } from "@google/genai";
 
         // =================================================================
-        // SYNC MANAGER - Simplified (No IndexedDB)
-        // Direct connection to Google Apps Script
+        // INDEXED DB SERVICE - Penyimpanan lokal untuk offline & caching
+        // Database: CBT_KLS4_DB
+        // =================================================================
+        const IndexedDBService = {
+            dbName: 'CBT_KLS4_DB',
+            dbVersion: 2,
+            db: null,
+            stores: ['users', 'questions', 'results', 'grades', 'settings', 'blockedStudents', 'syncQueue', 'metadata'],
+            
+            // Initialize database
+            async init() {
+                return new Promise((resolve, reject) => {
+                    const request = indexedDB.open(this.dbName, this.dbVersion);
+                    
+                    request.onerror = () => reject(request.error);
+                    
+                    request.onsuccess = () => {
+                        this.db = request.result;
+                        console.log('IndexedDB initialized successfully');
+                        resolve(this.db);
+                    };
+                    
+                    request.onupgradeneeded = (event) => {
+                        const db = event.target.result;
+                        
+                        // Create object stores
+                        this.stores.forEach(storeName => {
+                            if (!db.objectStoreNames.contains(storeName)) {
+                                const store = db.createObjectStore(storeName, { keyPath: 'id', autoIncrement: true });
+                                
+                                // Add indexes based on store type
+                                if (storeName === 'users') {
+                                    store.createIndex('username', 'username', { unique: true });
+                                    store.createIndex('role', 'role', { unique: false });
+                                    store.createIndex('kelas', 'kelas', { unique: false });
+                                }
+                                if (storeName === 'questions') {
+                                    store.createIndex('kode', 'kode', { unique: false });
+                                    store.createIndex('kelas', 'kelas', { unique: false });
+                                    store.createIndex('mataPelajaran', 'mataPelajaran', { unique: false });
+                                }
+                                if (storeName === 'results' || storeName === 'grades') {
+                                    store.createIndex('username', 'username', { unique: false });
+                                    store.createIndex('kodeUjian', 'kodeUjian', { unique: false });
+                                    store.createIndex('kelas', 'kelas', { unique: false });
+                                }
+                                if (storeName === 'syncQueue') {
+                                    store.createIndex('action', 'action', { unique: false });
+                                    store.createIndex('timestamp', 'timestamp', { unique: false });
+                                    store.createIndex('status', 'status', { unique: false });
+                                }
+                                if (storeName === 'metadata') {
+                                    store.createIndex('key', 'key', { unique: true });
+                                }
+                            }
+                        });
+                    };
+                });
+            },
+            
+            // Generic CRUD operations
+            async getAll(storeName) {
+                return new Promise((resolve, reject) => {
+                    if (!this.db) { resolve([]); return; }
+                    const transaction = this.db.transaction(storeName, 'readonly');
+                    const store = transaction.objectStore(storeName);
+                    const request = store.getAll();
+                    request.onsuccess = () => resolve(request.result || []);
+                    request.onerror = () => reject(request.error);
+                });
+            },
+            
+            async get(storeName, id) {
+                return new Promise((resolve, reject) => {
+                    if (!this.db) { resolve(null); return; }
+                    const transaction = this.db.transaction(storeName, 'readonly');
+                    const store = transaction.objectStore(storeName);
+                    const request = store.get(id);
+                    request.onsuccess = () => resolve(request.result);
+                    request.onerror = () => reject(request.error);
+                });
+            },
+            
+            async put(storeName, data) {
+                return new Promise((resolve, reject) => {
+                    if (!this.db) { resolve(null); return; }
+                    const transaction = this.db.transaction(storeName, 'readwrite');
+                    const store = transaction.objectStore(storeName);
+                    const request = store.put(data);
+                    request.onsuccess = () => resolve(request.result);
+                    request.onerror = () => reject(request.error);
+                });
+            },
+            
+            async putBulk(storeName, dataArray) {
+                return new Promise((resolve, reject) => {
+                    if (!this.db || !Array.isArray(dataArray)) { resolve([]); return; }
+                    const transaction = this.db.transaction(storeName, 'readwrite');
+                    const store = transaction.objectStore(storeName);
+                    
+                    dataArray.forEach(item => {
+                        if (item && typeof item === 'object') {
+                            store.put(item);
+                        }
+                    });
+                    
+                    transaction.oncomplete = () => resolve(dataArray);
+                    transaction.onerror = () => reject(transaction.error);
+                });
+            },
+            
+            async delete(storeName, id) {
+                return new Promise((resolve, reject) => {
+                    if (!this.db) { resolve(false); return; }
+                    const transaction = this.db.transaction(storeName, 'readwrite');
+                    const store = transaction.objectStore(storeName);
+                    const request = store.delete(id);
+                    request.onsuccess = () => resolve(true);
+                    request.onerror = () => reject(request.error);
+                });
+            },
+            
+            async clear(storeName) {
+                return new Promise((resolve, reject) => {
+                    if (!this.db) { resolve(false); return; }
+                    const transaction = this.db.transaction(storeName, 'readwrite');
+                    const store = transaction.objectStore(storeName);
+                    const request = store.clear();
+                    request.onsuccess = () => resolve(true);
+                    request.onerror = () => reject(request.error);
+                });
+            },
+            
+            // Query by index
+            async getByIndex(storeName, indexName, value) {
+                return new Promise((resolve, reject) => {
+                    if (!this.db) { resolve([]); return; }
+                    const transaction = this.db.transaction(storeName, 'readonly');
+                    const store = transaction.objectStore(storeName);
+                    const index = store.index(indexName);
+                    const request = index.getAll(value);
+                    request.onsuccess = () => resolve(request.result || []);
+                    request.onerror = () => reject(request.error);
+                });
+            },
+            
+            // Metadata helpers untuk tracking sync
+            async setMeta(key, value) {
+                return this.put('metadata', { id: key, key, value, updatedAt: Date.now() });
+            },
+            
+            async getMeta(key) {
+                const meta = await this.get('metadata', key);
+                return meta ? meta.value : null;
+            },
+            
+            // Check if data needs sync (older than TTL)
+            async needsSync(storeName, ttlMs = 300000) { // Default 5 menit
+                const lastSync = await this.getMeta(`lastSync_${storeName}`);
+                if (!lastSync) return true;
+                return (Date.now() - lastSync) > ttlMs;
+            },
+            
+            // Mark store as synced
+            async markSynced(storeName) {
+                return this.setMeta(`lastSync_${storeName}`, Date.now());
+            }
+        };
+
+        // =================================================================
+        // BACKGROUND SYNC MANAGER - Sinkronisasi di latar belakang
+        // =================================================================
+        const BackgroundSync = {
+            syncInterval: null,
+            isSyncing: false,
+            syncIntervalMs: 60000, // Sync setiap 1 menit
+            pendingOperations: [],
+            
+            async init() {
+                // Start background sync interval
+                this.startBackgroundSync();
+                
+                // Listen for online event to trigger sync
+                window.addEventListener('online', () => {
+                    console.log('Back online - triggering sync');
+                    this.syncAll();
+                });
+                
+                // Sync when tab becomes visible
+                document.addEventListener('visibilitychange', () => {
+                    if (document.visibilityState === 'visible' && navigator.onLine) {
+                        this.syncAll();
+                    }
+                });
+            },
+            
+            startBackgroundSync() {
+                if (this.syncInterval) return;
+                
+                this.syncInterval = setInterval(() => {
+                    if (navigator.onLine && !this.isSyncing) {
+                        this.syncAll();
+                    }
+                }, this.syncIntervalMs);
+                
+                console.log('Background sync started');
+            },
+            
+            stopBackgroundSync() {
+                if (this.syncInterval) {
+                    clearInterval(this.syncInterval);
+                    this.syncInterval = null;
+                }
+            },
+            
+            // Add operation to sync queue
+            async queueOperation(action, storeName, data) {
+                const operation = {
+                    id: `op-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                    action,
+                    storeName,
+                    data,
+                    timestamp: Date.now(),
+                    status: 'pending',
+                    retryCount: 0
+                };
+                
+                await IndexedDBService.put('syncQueue', operation);
+                
+                // Sync immediately if online (dengan await untuk memastikan terkirim)
+                if (navigator.onLine) {
+                    await this.processSyncQueue();
+                }
+                
+                return operation;
+            },
+            
+            // Process pending sync queue
+            async processSyncQueue() {
+                if (this.isSyncing || !navigator.onLine) return;
+                
+                try {
+                    const queue = await IndexedDBService.getAll('syncQueue');
+                    const pendingOps = queue.filter(op => op.status === 'pending');
+                    
+                    for (const op of pendingOps) {
+                        try {
+                            await this.executeOperation(op);
+                            op.status = 'completed';
+                            await IndexedDBService.put('syncQueue', op);
+                        } catch (error) {
+                            op.retryCount++;
+                            op.status = op.retryCount >= 3 ? 'failed' : 'pending';
+                            op.lastError = error.message;
+                            await IndexedDBService.put('syncQueue', op);
+                        }
+                    }
+                    
+                    // Clean up completed operations
+                    const completed = queue.filter(op => op.status === 'completed');
+                    for (const op of completed) {
+                        await IndexedDBService.delete('syncQueue', op.id);
+                    }
+                } catch (error) {
+                    console.error('Error processing sync queue:', error);
+                }
+            },
+            
+            async executeOperation(op) {
+                const { action, storeName, data } = op;
+                
+                try {
+                    switch (action) {
+                        case 'add':
+                            // Special case: blockedStudents uses 'blockStudent' action
+                            if (storeName === 'blockedStudents') {
+                                return await callGoogleScript('POST', { action: 'blockStudent', data: data });
+                            }
+                            return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, data: data });
+                        case 'addBatch':
+                            // Untuk results, GAS expects 'addResults' (plural), bukan 'addResult'
+                            if (storeName === 'results') {
+                                return await callGoogleScript('POST', { action: 'addResults', data: data });
+                            }
+                            return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, data: data });
+                        case 'addQuestionsBatch':
+                            // Special case: GAS expects 'addQuestionsBatch' action name
+                            return await callGoogleScript('POST', { action: 'addQuestionsBatch', data: data });
+                        case 'update':
+                            // Special case: settings uses 'saveSettings' action
+                            if (storeName === 'settings') {
+                                return await callGoogleScript('POST', { action: 'saveSettings', data: data });
+                            }
+                            const updateResult = await callGoogleScript('POST', { action: `update${this.capitalize(storeName)}`, data: data });
+                            // Smart retry: jika UPDATE gagal dengan "not found", coba CREATE
+                            if (updateResult.status !== 'success' && updateResult.message?.includes('not found')) {
+                                console.log(`UPDATE failed for ${storeName}, retrying as CREATE...`);
+                                return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, data: data });
+                            }
+                            return updateResult;
+                        case 'delete':
+                            // Special case: blockedStudents uses 'unblockStudent' action with blockId
+                            if (storeName === 'blockedStudents') {
+                                // Handle single unblock or unblock all
+                                if (data.all) {
+                                    return await callGoogleScript('POST', { action: 'unblockAllStudents', data: {} });
+                                }
+                                return await callGoogleScript('POST', { action: 'unblockStudent', data: { blockId: data.blockId || data.id, username: data.username, examCode: data.examCode } });
+                            }
+                            return await callGoogleScript('POST', { action: `delete${this.capitalize(storeName)}`, data: { id: data.id, ...data } });
+                        default:
+                            throw new Error(`Unknown action: ${action}`);
+                    }
+                } catch (error) {
+                    // Smart retry untuk network errors pada UPDATE
+                    if (action === 'update' && error.message?.includes('Failed')) {
+                        console.log(`UPDATE network error for ${storeName}, will retry as CREATE...`);
+                        try {
+                            return await callGoogleScript('POST', { action: `add${this.capitalize(storeName)}`, data: data });
+                        } catch (retryError) {
+                            throw retryError;
+                        }
+                    }
+                    throw error;
+                }
+            },
+            
+            capitalize(str) {
+                // Handle plural to singular for API
+                const singular = str.endsWith('s') ? str.slice(0, -1) : str;
+                return singular.charAt(0).toUpperCase() + singular.slice(1);
+            },
+            
+            // Sync all data stores from server
+            async syncAll() {
+                if (this.isSyncing || !navigator.onLine) return;
+                this.isSyncing = true;
+                
+                console.log('Starting background sync...');
+                this.showSyncIndicator(true);
+                
+                try {
+                    // Process pending operations first
+                    await this.processSyncQueue();
+                    
+                    // Sync each store that needs it
+                    const stores = ['users', 'questions', 'results', 'grades', 'settings', 'blockedStudents'];
+                    
+                    for (const store of stores) {
+                        if (await IndexedDBService.needsSync(store)) {
+                            await this.syncStore(store);
+                        }
+                    }
+                    
+                    console.log('Background sync completed');
+                } catch (error) {
+                    console.error('Background sync error:', error);
+                } finally {
+                    this.isSyncing = false;
+                    this.showSyncIndicator(false);
+                }
+            },
+            
+            async syncStore(storeName) {
+                try {
+                    let data = [];
+                    
+                    switch (storeName) {
+                        case 'users':
+                            const usersResult = await callGoogleScript('GET', { action: 'getUsers' });
+                            data = usersResult.status === 'success' ? usersResult.data : [];
+                            // Update AppState
+                            if (data.length > 0) {
+                                AppState.users = data.map((user, index) => ({
+                                    ...user,
+                                    id: user.id || `gs-user-${index}`
+                                }));
+                            }
+                            break;
+                            
+                        case 'questions':
+                            const questionsResult = await callGoogleScript('GET', { action: 'getQuestions' });
+                            data = questionsResult.status === 'success' ? questionsResult.data : [];
+                            break;
+                            
+                        case 'results':
+                            const resultsResult = await callGoogleScript('GET', { action: 'getResults' });
+                            data = resultsResult.status === 'success' ? resultsResult.data : [];
+                            break;
+                            
+                        case 'grades':
+                            const gradesResult = await callGoogleScript('GET', { action: 'getGrades' });
+                            data = gradesResult.status === 'success' ? gradesResult.data : [];
+                            break;
+                            
+                        case 'settings':
+                            const settingsResult = await callGoogleScript('GET', { action: 'getSettings', key: 'examConfig' });
+                            if (settingsResult.status === 'success' && settingsResult.data) {
+                                data = [{ id: 'examConfig', ...settingsResult.data }];
+                                AppState.examConfig = settingsResult.data;
+                            }
+                            break;
+                            
+                        case 'blockedStudents':
+                            const blockedResult = await callGoogleScript('GET', { action: 'getBlockedStudents' });
+                            data = blockedResult.status === 'success' ? blockedResult.data : [];
+                            break;
+                    }
+                    
+                    // Clear and repopulate store
+                    if (data.length > 0) {
+                        await IndexedDBService.clear(storeName);
+                        await IndexedDBService.putBulk(storeName, data);
+                        await IndexedDBService.markSynced(storeName);
+                        
+                        // Update memory cache
+                        AppState.cache.set(storeName, { data, timestamp: Date.now(), valid: true });
+                    }
+                    
+                    console.log(`Synced ${storeName}: ${data.length} items`);
+                } catch (error) {
+                    console.error(`Error syncing ${storeName}:`, error);
+                }
+            },
+            
+            showSyncIndicator(show) {
+                // Syncing berjalan di background tanpa indikator visual
+                // Uncomment kode di bawah jika ingin menampilkan indikator
+                /*
+                let indicator = document.getElementById('bgSyncIndicator');
+                
+                if (!indicator && show) {
+                    indicator = document.createElement('div');
+                    indicator.id = 'bgSyncIndicator';
+                    indicator.className = 'fixed bottom-4 right-4 bg-blue-500 text-white px-3 py-2 rounded-full shadow-lg flex items-center gap-2 text-sm z-50 transition-opacity duration-300';
+                    indicator.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i><span>Syncing...</span>';
+                    document.body.appendChild(indicator);
+                }
+                
+                if (indicator) {
+                    indicator.style.opacity = show ? '1' : '0';
+                    if (!show) {
+                        setTimeout(() => indicator?.remove(), 300);
+                    }
+                }
+                */
+            }
+        };
+
+        // =================================================================
+        // SYNC MANAGER - Enhanced with IndexedDB
         // =================================================================
         const SyncManager = {
             isOnline: navigator.onLine,
@@ -677,131 +1126,549 @@
         };
 
         // =================================================================
-        // DATA SERVICE - Direct Google Sheets API (No IndexedDB)
-        // Web App → Google Apps Script (Direct)
+        // CACHE HELPER - Simple cache utilities
+        // =================================================================
+        const CacheHelper = {
+            // Get cached data dari memory
+            getCached(key) {
+                const cached = AppState.cache.get(key);
+                if (cached && cached.valid) {
+                    return cached.data;
+                }
+                return null;
+            },
+            
+            // Check if data is cached and valid (cache TTL: 5 menit)
+            isCacheValid(key, ttlMs = 300000) {
+                const cached = AppState.cache.get(key);
+                if (!cached) return false;
+                return (Date.now() - cached.timestamp) < ttlMs;
+            },
+            
+            // Set cache data
+            setCache(key, data) {
+                AppState.cache.set(key, {
+                    data: data,
+                    timestamp: Date.now(),
+                    valid: true
+                });
+            },
+            
+            // Invalidate cache (memory dan IndexedDB)
+            async invalidateCache(key) {
+                const cached = AppState.cache.get(key);
+                if (cached) {
+                    cached.valid = false;
+                }
+                
+                try {
+                    await IndexedDBService.setMeta(`lastSync_${key}`, 0);
+                } catch (error) {
+                    console.warn(`Could not invalidate IndexedDB cache for ${key}`);
+                }
+            }
+        };
+
+        // =================================================================
+        // DATA SERVICE - Enhanced dengan IndexedDB & Background Sync
+        // Optimistic UI: Update lokal dulu, sync ke server di background
         // =================================================================
         const DataService = {
             // ============ USERS ============
-            async getUsers() {
+            async getUsers(forceRefresh = false) {
+                // Check memory cache dulu
+                if (!forceRefresh && CacheHelper.isCacheValid('users')) {
+                    const cached = CacheHelper.getCached('users');
+                    if (cached) return cached;
+                }
+                
+                // Check IndexedDB jika tidak force refresh
+                if (!forceRefresh) {
+                    try {
+                        const idbData = await IndexedDBService.getAll('users');
+                        if (idbData && idbData.length > 0) {
+                            AppState.cache.set('users', { data: idbData, timestamp: Date.now(), valid: true });
+                            AppState.users = idbData;
+                            // Trigger background refresh
+                            BackgroundSync.syncStore('users');
+                            return idbData;
+                        }
+                    } catch (e) { console.warn('IDB read error:', e); }
+                }
+                
+                // Fetch dari server
                 const result = await callGoogleScript('GET', { action: 'getUsers' });
-                return result.status === 'success' ? result.data : [];
+                const data = result.status === 'success' ? result.data : [];
+                
+                // Update semua cache layers
+                AppState.cache.set('users', { data, timestamp: Date.now(), valid: true });
+                AppState.users = data;
+                await IndexedDBService.clear('users');
+                await IndexedDBService.putBulk('users', data);
+                await IndexedDBService.markSynced('users');
+                
+                return data;
             },
             
             async addUser(userData) {
-                const result = await callGoogleScript('POST', { action: 'addUser', data: userData });
-                return { success: result.status === 'success', message: result.message };
+                // Generate ID
+                const tempId = userData.id || `user-${Date.now()}`;
+                const newUser = { ...userData, id: tempId };
+                
+                // 1. Update React State (Optimistic UI)
+                const cached = CacheHelper.getCached('users') || [];
+                cached.push(newUser);
+                AppState.cache.set('users', { data: cached, timestamp: Date.now(), valid: true });
+                AppState.users = cached;
+                
+                // 2. Save to IndexedDB
+                await IndexedDBService.put('users', newUser);
+                
+                // 3. Enqueue for background sync (non-blocking)
+                await BackgroundSync.queueOperation('add', 'users', newUser);
+                
+                return { success: true, message: 'User berhasil ditambahkan' };
             },
             
             async updateUser(userData) {
-                const result = await callGoogleScript('POST', { action: 'updateUser', data: userData });
-                return { success: result.status === 'success', message: result.message };
+                // 1. Optimistic update
+                const cached = CacheHelper.getCached('users') || [];
+                const index = cached.findIndex(u => u.username === userData.username || u.id === userData.id);
+                let updatedUser = userData;
+                
+                if (index !== -1) {
+                    updatedUser = { ...cached[index], ...userData };
+                    cached[index] = updatedUser;
+                    AppState.cache.set('users', { data: cached, timestamp: Date.now(), valid: true });
+                    AppState.users = cached;
+                    
+                    // 2. Save to IndexedDB
+                    await IndexedDBService.put('users', updatedUser);
+                }
+                
+                // 3. Enqueue for background sync
+                await BackgroundSync.queueOperation('update', 'users', updatedUser);
+                
+                return { success: true, message: 'User berhasil diupdate' };
             },
             
             async deleteUser(username) {
-                const result = await callGoogleScript('POST', { action: 'deleteUser', data: { username: username } });
-                return { success: result.status === 'success', message: result.message };
+                // 1. Optimistic delete
+                const cached = CacheHelper.getCached('users') || [];
+                const userToDelete = cached.find(u => u.username === username);
+                const filteredData = cached.filter(u => u.username !== username);
+                
+                AppState.cache.set('users', { data: filteredData, timestamp: Date.now(), valid: true });
+                AppState.users = filteredData;
+                
+                // 2. Delete from IndexedDB
+                if (userToDelete?.id) {
+                    await IndexedDBService.delete('users', userToDelete.id);
+                }
+                
+                // 3. Enqueue for background sync
+                await BackgroundSync.queueOperation('delete', 'users', { id: userToDelete?.id, username });
+                
+                return { success: true, message: 'User berhasil dihapus' };
             },
             
             // ============ QUESTIONS ============
-            async getQuestions(kode = null) {
+            async getQuestions(kode = null, forceRefresh = false) {
+                if (!forceRefresh && !kode && CacheHelper.isCacheValid('questions')) {
+                    const cached = CacheHelper.getCached('questions');
+                    if (cached) return cached;
+                }
+                
+                // Check IndexedDB
+                if (!forceRefresh && !kode) {
+                    try {
+                        const idbData = await IndexedDBService.getAll('questions');
+                        if (idbData && idbData.length > 0) {
+                            AppState.cache.set('questions', { data: idbData, timestamp: Date.now(), valid: true });
+                            BackgroundSync.syncStore('questions');
+                            return idbData;
+                        }
+                    } catch (e) { console.warn('IDB read error:', e); }
+                }
+                
                 const params = kode ? { action: 'getQuestions', kode: kode } : { action: 'getQuestions' };
                 const result = await callGoogleScript('GET', params);
-                return result.status === 'success' ? result.data : [];
+                const data = result.status === 'success' ? result.data : [];
+                
+                if (!kode) {
+                    AppState.cache.set('questions', { data, timestamp: Date.now(), valid: true });
+                    await IndexedDBService.clear('questions');
+                    await IndexedDBService.putBulk('questions', data);
+                    await IndexedDBService.markSynced('questions');
+                }
+                return data;
             },
             
             async addQuestion(questionData) {
-                const result = await callGoogleScript('POST', { action: 'addQuestion', data: questionData });
-                return { success: result.status === 'success', message: result.message };
+                const tempId = questionData.id || `q-${Date.now()}`;
+                const newQuestion = { ...questionData, id: tempId };
+                
+                // 1. Optimistic update
+                const cached = CacheHelper.getCached('questions') || [];
+                cached.push(newQuestion);
+                AppState.cache.set('questions', { data: cached, timestamp: Date.now(), valid: true });
+                
+                // 2. Save to IndexedDB
+                await IndexedDBService.put('questions', newQuestion);
+                
+                // 3. Enqueue for background sync
+                await BackgroundSync.queueOperation('add', 'questions', newQuestion);
+                
+                return { success: true, message: 'Soal berhasil ditambahkan' };
             },
             
             async addQuestions(questionsArray) {
-                const result = await callGoogleScript('POST', { action: 'addQuestions', data: questionsArray });
-                return { success: result.status === 'success', message: result.message };
+                // 1. Optimistic update
+                const cached = CacheHelper.getCached('questions') || [];
+                const newQuestions = questionsArray.map((q, i) => ({ ...q, id: q.id || `q-${Date.now()}-${i}` }));
+                cached.push(...newQuestions);
+                AppState.cache.set('questions', { data: cached, timestamp: Date.now(), valid: true });
+                
+                // 2. Save to IndexedDB
+                await IndexedDBService.putBulk('questions', newQuestions);
+                
+                // 3. Enqueue as batch - use special action name for GAS compatibility
+                await BackgroundSync.queueOperation('addQuestionsBatch', 'questions', newQuestions);
+                
+                return { success: true, message: `${newQuestions.length} soal berhasil ditambahkan` };
             },
             
             async updateQuestion(questionData) {
-                const result = await callGoogleScript('POST', { action: 'updateQuestion', data: questionData });
-                return { success: result.status === 'success', message: result.message };
+                const cached = CacheHelper.getCached('questions') || [];
+                const index = cached.findIndex(q => q.id === questionData.id);
+                let updatedQuestion = questionData;
+                
+                if (index !== -1) {
+                    updatedQuestion = { ...cached[index], ...questionData };
+                    cached[index] = updatedQuestion;
+                    AppState.cache.set('questions', { data: cached, timestamp: Date.now(), valid: true });
+                    await IndexedDBService.put('questions', updatedQuestion);
+                }
+                
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('update', 'questions', updatedQuestion);
+                
+                return { success: true, message: 'Soal berhasil diupdate' };
             },
             
             async deleteQuestion(questionId) {
-                const result = await callGoogleScript('POST', { action: 'deleteQuestion', data: { id: questionId } });
-                return { success: result.status === 'success', message: result.message };
+                const cached = CacheHelper.getCached('questions') || [];
+                const filteredData = cached.filter(q => q.id !== questionId);
+                AppState.cache.set('questions', { data: filteredData, timestamp: Date.now(), valid: true });
+                await IndexedDBService.delete('questions', questionId);
+                
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('delete', 'questions', { id: questionId });
+                
+                return { success: true, message: 'Soal berhasil dihapus' };
             },
             
             async deleteQuestions(questionIds) {
-                const result = await callGoogleScript('POST', { action: 'deleteQuestions', data: { ids: questionIds } });
-                return { success: result.status === 'success', message: result.message };
+                const cached = CacheHelper.getCached('questions') || [];
+                const filteredData = cached.filter(q => !questionIds.includes(q.id));
+                AppState.cache.set('questions', { data: filteredData, timestamp: Date.now(), valid: true });
+                
+                // Delete from IndexedDB and enqueue
+                for (const id of questionIds) {
+                    await IndexedDBService.delete('questions', id);
+                    await BackgroundSync.queueOperation('delete', 'questions', { id });
+                }
+                
+                return { success: true, message: `${questionIds.length} soal berhasil dihapus` };
             },
             
             // ============ RESULTS ============
-            async getResults(filters = {}) {
+            async getResults(filters = {}, forceRefresh = false) {
+                const hasFilters = Object.keys(filters).length > 0;
+                
+                if (!forceRefresh && !hasFilters && CacheHelper.isCacheValid('results')) {
+                    const cached = CacheHelper.getCached('results');
+                    if (cached) return cached;
+                }
+                
+                if (!forceRefresh && !hasFilters) {
+                    try {
+                        const idbData = await IndexedDBService.getAll('results');
+                        if (idbData && idbData.length > 0) {
+                            AppState.cache.set('results', { data: idbData, timestamp: Date.now(), valid: true });
+                            BackgroundSync.syncStore('results');
+                            return idbData;
+                        }
+                    } catch (e) { console.warn('IDB read error:', e); }
+                }
+                
                 const params = { action: 'getResults', ...filters };
                 const result = await callGoogleScript('GET', params);
-                return result.status === 'success' ? result.data : [];
+                const data = result.status === 'success' ? result.data : [];
+                
+                if (!hasFilters) {
+                    AppState.cache.set('results', { data, timestamp: Date.now(), valid: true });
+                    await IndexedDBService.clear('results');
+                    await IndexedDBService.putBulk('results', data);
+                    await IndexedDBService.markSynced('results');
+                }
+                return data;
             },
             
             async addResults(resultsArray) {
-                const result = await callGoogleScript('POST', { action: 'addResults', data: resultsArray });
-                return { success: result.status === 'success', message: result.message };
+                const cached = CacheHelper.getCached('results') || [];
+                const newResults = resultsArray.map((r, i) => ({ ...r, id: r.id || `r-${Date.now()}-${i}` }));
+                cached.push(...newResults);
+                AppState.cache.set('results', { data: cached, timestamp: Date.now(), valid: true });
+                await IndexedDBService.putBulk('results', newResults);
+                
+                // Enqueue sebagai SATU batch operation, bukan per-item
+                await BackgroundSync.queueOperation('addBatch', 'results', newResults);
+                
+                return { success: true, message: `${newResults.length} hasil berhasil ditambahkan` };
             },
             
             async updateResult(resultData) {
-                const result = await callGoogleScript('POST', { action: 'updateResult', data: resultData });
-                return { success: result.status === 'success', message: result.message };
+                const cached = CacheHelper.getCached('results') || [];
+                const index = cached.findIndex(r => r.id === resultData.id);
+                let updatedResult = resultData;
+                
+                if (index !== -1) {
+                    updatedResult = { ...cached[index], ...resultData };
+                    cached[index] = updatedResult;
+                    AppState.cache.set('results', { data: cached, timestamp: Date.now(), valid: true });
+                    await IndexedDBService.put('results', updatedResult);
+                }
+                
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('update', 'results', updatedResult);
+                
+                return { success: true, message: 'Hasil berhasil diupdate' };
             },
             
             async deleteResults(filters) {
-                const result = await callGoogleScript('POST', { action: 'deleteResults', data: filters });
-                return { success: result.status === 'success', message: result.message };
+                // Clear local cache and IndexedDB
+                AppState.cache.set('results', { data: [], timestamp: Date.now(), valid: false });
+                await IndexedDBService.clear('results');
+                
+                // Enqueue delete operation
+                await BackgroundSync.queueOperation('delete', 'results', filters);
+                
+                return { success: true, message: 'Hasil berhasil dihapus' };
             },
             
             // ============ GRADES ============
-            async getGrades(filters = {}) {
+            async getGrades(filters = {}, forceRefresh = false) {
+                const hasFilters = Object.keys(filters).length > 0;
+                
+                if (!forceRefresh && !hasFilters && CacheHelper.isCacheValid('grades')) {
+                    const cached = CacheHelper.getCached('grades');
+                    if (cached) return cached;
+                }
+                
+                if (!forceRefresh && !hasFilters) {
+                    try {
+                        const idbData = await IndexedDBService.getAll('grades');
+                        if (idbData && idbData.length > 0) {
+                            AppState.cache.set('grades', { data: idbData, timestamp: Date.now(), valid: true });
+                            BackgroundSync.syncStore('grades');
+                            return idbData;
+                        }
+                    } catch (e) { console.warn('IDB read error:', e); }
+                }
+                
                 const params = { action: 'getGrades', ...filters };
                 const result = await callGoogleScript('GET', params);
-                return result.status === 'success' ? result.data : [];
+                const data = result.status === 'success' ? result.data : [];
+                
+                if (!hasFilters) {
+                    AppState.cache.set('grades', { data, timestamp: Date.now(), valid: true });
+                    await IndexedDBService.clear('grades');
+                    await IndexedDBService.putBulk('grades', data);
+                    await IndexedDBService.markSynced('grades');
+                }
+                return data;
             },
             
             async addGrade(gradeData) {
-                const result = await callGoogleScript('POST', { action: 'addGrade', data: gradeData });
-                return { success: result.status === 'success', message: result.message };
+                const tempId = gradeData.id || `g-${Date.now()}`;
+                const newGrade = { ...gradeData, id: tempId };
+                
+                const cached = CacheHelper.getCached('grades') || [];
+                cached.push(newGrade);
+                AppState.cache.set('grades', { data: cached, timestamp: Date.now(), valid: true });
+                await IndexedDBService.put('grades', newGrade);
+                
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('add', 'grades', newGrade);
+                
+                return { success: true, message: 'Nilai berhasil ditambahkan' };
             },
             
             async updateGrade(gradeData) {
-                const result = await callGoogleScript('POST', { action: 'updateGrade', data: gradeData });
-                return { success: result.status === 'success', message: result.message };
+                const cached = CacheHelper.getCached('grades') || [];
+                // Cari dengan id ATAU gradeId ATAU kombinasi namaSiswa+kodeSoal
+                const index = cached.findIndex(g => 
+                    g.id === gradeData.id || 
+                    g.id === gradeData.gradeId || 
+                    g.gradeId === gradeData.gradeId ||
+                    g.gradeId === gradeData.id ||
+                    (gradeData.namaSiswa && gradeData.kodeSoal && 
+                     g.namaSiswa === gradeData.namaSiswa && g.kodeSoal === gradeData.kodeSoal)
+                );
+                let updatedGrade = gradeData;
+                
+                if (index !== -1) {
+                    // Merge dengan data existing untuk memastikan semua field tersedia
+                    updatedGrade = { ...cached[index], ...gradeData };
+                    // Pastikan gradeId konsisten
+                    updatedGrade.gradeId = updatedGrade.gradeId || cached[index].gradeId;
+                    updatedGrade.id = updatedGrade.id || updatedGrade.gradeId;
+                    cached[index] = updatedGrade;
+                } else {
+                    // Jika tidak ditemukan, tambahkan sebagai baru
+                    updatedGrade = { ...gradeData, id: gradeData.id || gradeData.gradeId };
+                    cached.push(updatedGrade);
+                }
+                
+                // Update cache global
+                AppState.cache.set('grades', { data: cached, timestamp: Date.now(), valid: true });
+                
+                // PENTING: Clear semua filtered cache untuk grades agar data konsisten
+                Object.keys(AppState.cache._data).forEach(key => {
+                    if (typeof key === 'string' && key.startsWith('grades_')) {
+                        delete AppState.cache._data[key];
+                    }
+                });
+                
+                // Update IndexedDB
+                await IndexedDBService.put('grades', updatedGrade);
+                
+                // Enqueue for background sync - pastikan gradeId, namaSiswa, kodeSoal ada
+                const syncData = {
+                    ...updatedGrade,
+                    gradeId: updatedGrade.gradeId,
+                    namaSiswa: updatedGrade.namaSiswa,
+                    kodeSoal: updatedGrade.kodeSoal
+                };
+                await BackgroundSync.queueOperation('update', 'grades', syncData);
+                
+                // TRIGGER: Auto-refresh UI Daftar Nilai jika sedang terbuka
+                if (typeof UI !== 'undefined' && typeof UI.refreshGradesUIIfVisible === 'function') {
+                    UI.refreshGradesUIIfVisible();
+                }
+                
+                return { success: true, message: 'Nilai berhasil diupdate' };
             },
             
             async deleteGrade(gradeId) {
-                const result = await callGoogleScript('POST', { action: 'deleteGrade', data: { gradeId: gradeId } });
-                return { success: result.status === 'success', message: result.message };
+                const cached = CacheHelper.getCached('grades') || [];
+                const filteredData = cached.filter(g => g.id !== gradeId);
+                AppState.cache.set('grades', { data: filteredData, timestamp: Date.now(), valid: true });
+                await IndexedDBService.delete('grades', gradeId);
+                
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('delete', 'grades', { id: gradeId });
+                
+                return { success: true, message: 'Nilai berhasil dihapus' };
             },
             
             async deleteGrades(gradeIds) {
-                const result = await callGoogleScript('POST', { action: 'deleteGrades', data: { gradeIds: gradeIds } });
-                return { success: result.status === 'success', message: result.message };
+                const cached = CacheHelper.getCached('grades') || [];
+                const filteredData = cached.filter(g => !gradeIds.includes(g.id));
+                AppState.cache.set('grades', { data: filteredData, timestamp: Date.now(), valid: true });
+                
+                for (const id of gradeIds) {
+                    await IndexedDBService.delete('grades', id);
+                    await BackgroundSync.queueOperation('delete', 'grades', { id });
+                }
+                
+                return { success: true, message: `${gradeIds.length} nilai berhasil dihapus` };
             },
             
             // ============ BLOCKED STUDENTS ============
-            async getBlockedStudents() {
+            async getBlockedStudents(forceRefresh = false) {
+                if (!forceRefresh && CacheHelper.isCacheValid('blockedStudents')) {
+                    const cached = CacheHelper.getCached('blockedStudents');
+                    if (cached) return cached;
+                }
+                
+                if (!forceRefresh) {
+                    try {
+                        const idbData = await IndexedDBService.getAll('blockedStudents');
+                        if (idbData && idbData.length > 0) {
+                            AppState.cache.set('blockedStudents', { data: idbData, timestamp: Date.now(), valid: true });
+                            BackgroundSync.syncStore('blockedStudents');
+                            return idbData;
+                        }
+                    } catch (e) { console.warn('IDB read error:', e); }
+                }
+                
                 const result = await callGoogleScript('GET', { action: 'getBlockedStudents' });
-                return result.status === 'success' ? result.data : [];
+                const data = result.status === 'success' ? result.data : [];
+                
+                AppState.cache.set('blockedStudents', { data, timestamp: Date.now(), valid: true });
+                await IndexedDBService.clear('blockedStudents');
+                await IndexedDBService.putBulk('blockedStudents', data.map((b, i) => ({ ...b, id: b.id || `blocked-${i}` })));
+                await IndexedDBService.markSynced('blockedStudents');
+                
+                return data;
             },
             
             async blockStudent(blockData) {
-                const result = await callGoogleScript('POST', { action: 'blockStudent', data: blockData });
-                return { success: result.status === 'success', message: result.message };
+                const tempId = `blocked-${Date.now()}`;
+                const newBlock = { ...blockData, id: tempId };
+                
+                const cached = CacheHelper.getCached('blockedStudents') || [];
+                cached.push(newBlock);
+                AppState.cache.set('blockedStudents', { data: cached, timestamp: Date.now(), valid: true });
+                await IndexedDBService.put('blockedStudents', newBlock);
+                
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('add', 'blockedStudents', newBlock);
+                
+                return { success: true, message: 'Siswa berhasil diblokir' };
             },
             
             async unblockStudent(blockId) {
-                const result = await callGoogleScript('POST', { action: 'unblockStudent', data: { blockId: blockId } });
-                return { success: result.status === 'success', message: result.message };
+                const cached = CacheHelper.getCached('blockedStudents') || [];
+                // Find the blocked student to get username and examCode for proper sync
+                const blockedStudent = cached.find(b => b.id === blockId || b.blockId === blockId);
+
+                // Sync directly with Google Sheets first (wait for completion)
+                const syncData = blockedStudent
+                    ? { blockId: blockedStudent.blockId, username: blockedStudent.username, examCode: blockedStudent.examCode }
+                    : { blockId: blockId };
+
+                try {
+                    await callGoogleScript('POST', { action: 'unblockStudent', data: syncData });
+                } catch (e) {
+                    console.error('Error syncing unblock to Google Sheets:', e);
+                    // Still continue to update local cache/IndexedDB
+                }
+
+                // Update local cache and IndexedDB
+                const filteredData = cached.filter(b => b.id !== blockId && b.blockId !== blockId);
+                AppState.cache.set('blockedStudents', { data: filteredData, timestamp: Date.now(), valid: true });
+                await IndexedDBService.delete('blockedStudents', blockId);
+
+                return { success: true, message: 'Siswa berhasil di-unblock' };
             },
-            
+
             async unblockAllStudents() {
-                const result = await callGoogleScript('POST', { action: 'unblockAllStudents', data: {} });
-                return { success: result.status === 'success', message: result.message };
+                // Sync directly with Google Sheets first (wait for completion)
+                try {
+                    await callGoogleScript('POST', { action: 'unblockAllStudents', data: {} });
+                } catch (e) {
+                    console.error('Error syncing unblock all to Google Sheets:', e);
+                    // Still continue to update local cache/IndexedDB
+                }
+
+                // Update local cache and IndexedDB
+                AppState.cache.set('blockedStudents', { data: [], timestamp: Date.now(), valid: true });
+                await IndexedDBService.clear('blockedStudents');
+
+                return { success: true, message: 'Semua siswa berhasil di-unblock' };
             },
             
             async isStudentBlocked(username, examCode) {
@@ -810,17 +1677,52 @@
             },
             
             // ============ SETTINGS ============
-            async getSettings(key = 'examConfig') {
-                const result = await callGoogleScript('GET', { action: 'getSettings', key: key });
-                if (result.status === 'success' && result.data) {
-                    return { key: key, ...result.data };
+            async getSettings(key = 'examConfig', forceRefresh = false) {
+                if (!forceRefresh && CacheHelper.isCacheValid('settings')) {
+                    const cached = CacheHelper.getCached('settings');
+                    if (cached) return cached;
                 }
-                return { key: key, durationMinutes: 60 }; // Default
+                
+                if (!forceRefresh) {
+                    try {
+                        const idbData = await IndexedDBService.getAll('settings');
+                        if (idbData && idbData.length > 0) {
+                            const settings = idbData[0];
+                            AppState.cache.set('settings', { data: settings, timestamp: Date.now(), valid: true });
+                            AppState.examConfig = settings;
+                            BackgroundSync.syncStore('settings');
+                            return settings;
+                        }
+                    } catch (e) { console.warn('IDB read error:', e); }
+                }
+                
+                const result = await callGoogleScript('GET', { action: 'getSettings', key: key });
+                let data;
+                if (result.status === 'success' && result.data) {
+                    data = { id: 'examConfig', key: key, ...result.data };
+                } else {
+                    data = { id: 'examConfig', key: key, durationMinutes: 60 };
+                }
+                
+                AppState.cache.set('settings', { data, timestamp: Date.now(), valid: true });
+                AppState.examConfig = data;
+                await IndexedDBService.clear('settings');
+                await IndexedDBService.put('settings', data);
+                await IndexedDBService.markSynced('settings');
+                
+                return data;
             },
             
             async saveSettings(settingsData) {
-                const result = await callGoogleScript('POST', { action: 'saveSettings', data: settingsData });
-                return { success: result.status === 'success', message: result.message };
+                const data = { id: 'examConfig', ...settingsData };
+                AppState.cache.set('settings', { data, timestamp: Date.now(), valid: true });
+                AppState.examConfig = data;
+                await IndexedDBService.put('settings', data);
+                
+                // Enqueue for background sync
+                await BackgroundSync.queueOperation('update', 'settings', data);
+                
+                return { success: true, message: 'Pengaturan berhasil disimpan' };
             }
         };
 
@@ -880,6 +1782,27 @@
                 return Math.round((1 - distance / maxLen) * 100);
             },
 
+            // Fuzzy word match - toleransi 1-2 typo per kata (Levenshtein Distance)
+            fuzzyWordMatch(word1, word2) {
+                const w1 = this.normalize(word1);
+                const w2 = this.normalize(word2);
+
+                if (w1 === w2) return true;
+
+                // Toleransi typo berdasarkan panjang kata
+                const maxLen = Math.max(w1.length, w2.length);
+                const distance = this.levenshteinDistance(w1, w2);
+
+                // Kata pendek (<=4 huruf): toleransi 1 typo
+                // Kata sedang (5-7 huruf): toleransi 1-2 typo
+                // Kata panjang (>7 huruf): toleransi 2 typo
+                let allowedTypos = 1;
+                if (maxLen >= 5 && maxLen <= 7) allowedTypos = 2;
+                if (maxLen > 7) allowedTypos = 2;
+
+                return distance <= allowedTypos;
+            },
+
             // Generate N-grams dari text
             generateNgrams(text, n = 2) {
                 const normalized = this.normalize(text);
@@ -924,6 +1847,9 @@
                     'atau', 'ada', 'mereka', 'sudah', 'saya', 'kita', 'kami', 'anda',
                     'bisa', 'dapat', 'harus', 'oleh', 'setelah', 'tentang', 'seperti',
                     'ketika', 'saat', 'jika', 'maka', 'karena', 'agar', 'supaya',
+                    'yaitu', 'yakni', 'merupakan', 'ialah', 'tersebut', 'sangat',
+                    'lebih', 'paling', 'lalu', 'kemudian', 'sebelum', 'sesudah',
+                    'bahwa', 'hal', 'cara', 'melalui', 'antara', 'sama', 'serta',
                     'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been',
                     'of', 'to', 'in', 'for', 'on', 'with', 'at', 'by', 'from'
                 ]);
@@ -933,30 +1859,42 @@
                 return words.filter(w => !stopwords.has(w));
             },
 
-            // Keyword Matching Similarity (0-100)
+            // Keyword Matching dengan Fuzzy (toleransi typo 1-2 karakter)
             keywordSimilarity(str1, str2) {
-                const keywords1 = this.extractKeywords(str1);
-                const keywords2 = this.extractKeywords(str2);
-                
+                const keywords1 = this.extractKeywords(str1); // jawaban siswa
+                const keywords2 = this.extractKeywords(str2); // kunci jawaban
+
                 if (keywords1.length === 0 && keywords2.length === 0) return 100;
                 if (keywords1.length === 0 || keywords2.length === 0) return 0;
-                
+
                 let matchScore = 0;
-                const totalKeywords = Math.max(keywords1.length, keywords2.length);
-                
-                keywords1.forEach(kw1 => {
-                    // Cari keyword yang cocok atau mirip (toleransi typo)
-                    const bestMatch = keywords2.reduce((best, kw2) => {
-                        const sim = this.levenshteinSimilarity(kw1, kw2);
-                        return sim > best ? sim : best;
-                    }, 0);
-                    
-                    // Jika similarity > 80%, anggap match (toleransi typo)
-                    if (bestMatch >= 80) {
-                        matchScore += bestMatch / 100;
+                const totalKeywords = keywords2.length; // Gunakan kunci jawaban sebagai acuan
+
+                // Untuk setiap keyword di kunci jawaban, cek apakah ada di jawaban siswa
+                keywords2.forEach(correctKeyword => {
+                    // Cek exact match atau fuzzy match (toleransi 1-2 typo)
+                    const hasMatch = keywords1.some(studentKeyword => {
+                        if (studentKeyword === correctKeyword) return true;
+                        if (this.fuzzyWordMatch(studentKeyword, correctKeyword)) return true;
+                        return false;
+                    });
+
+                    if (hasMatch) {
+                        matchScore += 1;
+                    } else {
+                        // Partial match dengan Levenshtein untuk kata mirip
+                        const bestSimilarity = keywords1.reduce((best, kw) => {
+                            const sim = this.levenshteinSimilarity(kw, correctKeyword);
+                            return sim > best ? sim : best;
+                        }, 0);
+
+                        // Jika similarity >= 70%, beri partial credit
+                        if (bestSimilarity >= 70) {
+                            matchScore += bestSimilarity / 100;
+                        }
                     }
                 });
-                
+
                 return Math.round((matchScore / totalKeywords) * 100);
             },
 
@@ -965,57 +1903,56 @@
                 // Normalisasi dulu
                 const student = this.normalize(studentAnswer);
                 const correct = this.normalize(correctAnswer);
-                
+
                 // Jika persis sama, langsung 100
                 if (student === correct) return 100;
-                
+
                 // Jika kosong
                 if (!student || student === 'tidak dijawab') return 0;
                 if (!correct) return 0;
-                
+
                 // Hitung 3 metode similarity
                 const levenshtein = this.levenshteinSimilarity(studentAnswer, correctAnswer);
                 const ngram = this.ngramSimilarity(studentAnswer, correctAnswer, 2);
                 const keyword = this.keywordSimilarity(studentAnswer, correctAnswer);
-                
-                // Bobot: Keyword 40%, Levenshtein 35%, N-gram 25%
-                // Keyword paling penting untuk menilai konsep
-                const weightedScore = (keyword * 0.40) + (levenshtein * 0.35) + (ngram * 0.25);
-                
+
+                // Bobot: Keyword 50%, Levenshtein 30%, N-gram 20%
+                // Keyword paling penting untuk menilai konsep uraian
+                const weightedScore = (keyword * 0.50) + (levenshtein * 0.30) + (ngram * 0.20);
+
                 return Math.round(weightedScore);
             },
 
-            // Fungsi utama untuk menilai jawaban
+            // ===== PENILAIAN FLEKSIBEL UNTUK SOAL URAIAN =====
+            // 1. Normalization: lowercase, trim, hapus tanda baca
+            // 2. Keyword Scoring: poin untuk kata kunci yang ditemukan
+            // 3. Fuzzy Matching: toleransi typo 1-2 karakter (Levenshtein)
+            // 4. Threshold 60%: similarity >= 60% = nilai 100
             gradeAnswer(studentAnswer, correctAnswer) {
                 const similarity = this.calculateCombinedSimilarity(studentAnswer, correctAnswer);
-                
-                // ATURAN PENILAIAN:
-                // Jika similarity >= 60%, berikan nilai PENUH (100) - toleransi typo
-                // Di bawah 60%, nilai proporsional
-                
+
                 let nilai;
-                if (similarity >= 60) {
-                    // Toleransi typo: 60% kemiripan = 100% nilai
-                    nilai = 100;
-                } else if (similarity >= 50) {
-                    // Nilai proporsional 50-99
-                    nilai = 50 + Math.round((similarity - 50) * 3.27); // 50% sim = 50 nilai, 64% sim = 96 nilai
-                } else {
-                    // Di bawah 50%, nilai proporsional rendah
-                    nilai = Math.round(similarity);
-                }
-                
-                // Generate feedback
                 let feedback;
-                if (nilai >= 100) {
-                    feedback = 'Jawaban benar! Sesuai dengan kunci jawaban.';
-                } else if (nilai >= 75) {
-                    feedback = 'Jawaban sudah mendekati benar, namun ada sedikit perbedaan.';
-                } else if (nilai >= 50) {
+
+                if (similarity >= 60) {
+                    // THRESHOLD 60%: Dianggap BENAR (nilai penuh)
+                    nilai = 100;
+                    feedback = 'Jawaban benar! Konsep dan kata kunci sesuai dengan kunci jawaban.';
+                } else if (similarity >= 50) {
+                    // Hampir mencapai threshold - nilai tinggi proporsional
+                    nilai = 70 + Math.round((similarity - 50) * 3); // 50% = 70, 59% = 97
+                    feedback = 'Jawaban sudah mendekati benar, ada sedikit perbedaan kata kunci.';
+                } else if (similarity >= 40) {
+                    // Cukup - sebagian konsep benar
+                    nilai = 50 + Math.round((similarity - 40) * 2); // 40% = 50, 49% = 68
                     feedback = 'Jawaban cukup, beberapa konsep penting sudah disebutkan.';
-                } else if (nilai >= 25) {
-                    feedback = 'Jawaban kurang lengkap, perlu perbaikan.';
+                } else if (similarity >= 25) {
+                    // Kurang - perlu perbaikan
+                    nilai = 25 + Math.round((similarity - 25) * 1.67); // 25% = 25, 39% = 48
+                    feedback = 'Jawaban kurang lengkap, perlu menambahkan kata kunci penting.';
                 } else {
+                    // Salah - tidak sesuai
+                    nilai = Math.round(similarity);
                     feedback = 'Jawaban tidak sesuai dengan kunci jawaban.';
                 }
                 
@@ -1024,6 +1961,256 @@
                     similarity: similarity,
                     feedback: feedback
                 };
+            }
+        };
+
+        // =================================================================
+        // SISTEM PENILAIAN SD (Keyword Coverage-based Grading)
+        // Khusus untuk anak SD dengan toleransi lebih longgar dan nilai lebih motivatif
+        // =================================================================
+        const SDGrading = {
+            // ===== KONFIGURASI PENILAIAN SD =====
+            config: {
+                // Skala nilai (lebih lembut untuk SD)
+                scoreRanges: [
+                    { min: 0, max: 9, score: 20, status: 'Mencoba', feedback: 'Terus berusaha ya!' },
+                    { min: 10, max: 19, score: 30, status: 'Kurang', feedback: 'Ada usaha, terus belajar!' },
+                    { min: 20, max: 29, score: 45, status: 'Cukup', feedback: 'Mulai paham, bagus!' },
+                    { min: 30, max: 39, score: 60, status: 'Cukup Baik', feedback: 'Bagus sekali!' },
+                    { min: 40, max: 49, score: 75, status: 'Baik', feedback: 'Hebat! Kamu paham sebagian besar!' },
+                    { min: 50, max: 59, score: 90, status: 'Sangat Baik', feedback: 'Sangat Hebat!' },
+                    { min: 60, max: 100, score: 100, status: 'Luar Biasa!', feedback: 'Luar Biasa! Kamu Pintar!' }
+                ],
+
+                // Typo tolerance (lebih longgar untuk SD)
+                typoTolerance: {
+                    minLength: 4,    // Kata ≤ 4 huruf: 0 typo
+                    shortWord: 7,   // Kata 5-7 huruf: 1 typo
+                    mediumWord: 12, // Kata 8-12 huruf: 2 typo
+                    longWord: 99    // Kata >12 huruf: 3 typo
+                },
+
+                // Fuzzy match threshold (lebih rendah untuk SD)
+                fuzzyThreshold: 0.65,  // 65% similarity dianggap match
+
+                // Stopword bahasa Indonesia (dihapus dari penilaian)
+                stopwords: [
+                    // Kata penghubung
+                    'dan', 'atau', 'tetapi', 'namun', 'karena', 'maka', 'jika',
+                    'sehingga', 'untuk', 'dengan', 'pada', 'di', 'ke', 'dari', 'dalam',
+                    // Kata tanya
+                    'apa', 'siapa', 'mengapa', 'bagaimana', 'kapan', 'dimana', 'kenapa',
+                    // Pronomina
+                    'saya', 'aku', 'kamu', 'engkau', 'dia', 'mereka', 'kita', 'kami',
+                    // Partikel
+                    'yang', 'pun', 'lah', 'kah', 'tah', 'juga', 'lagi', 'lebih', 'paling',
+                    // Preposisi
+                    'oleh', 'yaitu', 'ialah', 'yakni', 'adalah', 'menjadi',
+                    // Kuantitas
+                    'semua', 'tiap', 'setiap', 'banyak', 'sedikit', 'sebagian',
+                    // Kata lain-lain
+                    'ini', 'itu', 'tersebut', 'sangat', 'lalu', 'kemudian', 'sebelum', 'sesudah',
+                    'bahwa', 'hal', 'cara', 'melalui', 'antara', 'sama', 'serta',
+                    // English common words
+                    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been',
+                    'of', 'to', 'in', 'for', 'on', 'with', 'at', 'by', 'from'
+                ]
+            },
+
+            // ===== FUNGSI UTAMA: gradeAnswerForSD =====
+            // Menilai jawaban siswa dengan metode keyword coverage
+            gradeAnswerForSD(studentAnswer, correctAnswer) {
+                // STEP 1: Ekstrak kata kunci
+                const correctKeywords = this.extractKeywords(correctAnswer);
+                const studentKeywords = this.extractKeywords(studentAnswer);
+
+                // STEP 2: Hitung matches
+                let totalScore = 0;
+                const matchedKeywords = [];
+                const missedKeywords = [];
+
+                correctKeywords.forEach(correctKeyword => {
+                    let bestMatch = null;
+                    let bestSimilarity = 0;
+
+                    // Cari match terbaik di jawaban siswa
+                    studentKeywords.forEach(studentKeyword => {
+                        const similarity = this.calculateSimilarity(
+                            studentKeyword,
+                            correctKeyword
+                        );
+
+                        if (similarity > bestSimilarity) {
+                            bestMatch = studentKeyword;
+                            bestSimilarity = similarity;
+                        }
+                    });
+
+                    // Hitung skor berdasarkan similarity
+                    if (bestSimilarity >= this.config.fuzzyThreshold) {
+                        totalScore += 1;
+                        matchedKeywords.push({
+                            correct: correctKeyword,
+                            student: bestMatch,
+                            similarity: bestSimilarity,
+                            type: 'full'
+                        });
+                    } else if (bestSimilarity >= 0.5) {
+                        // Partial match (setengah poin)
+                        totalScore += 0.5;
+                        matchedKeywords.push({
+                            correct: correctKeyword,
+                            student: bestMatch,
+                            similarity: bestSimilarity,
+                            type: 'partial'
+                        });
+                    } else {
+                        missedKeywords.push(correctKeyword);
+                    }
+                });
+
+                // STEP 3: Hitung persentase
+                const percentage = (totalScore / correctKeywords.length) * 100;
+
+                // STEP 4: Tentukan skor akhir
+                const scoreRange = this.config.scoreRanges.find(
+                    range => percentage >= range.min && percentage <= range.max
+                );
+
+                const finalScore = scoreRange ? scoreRange.score : 0;
+                const feedback = scoreRange ? scoreRange.feedback : "";
+                const status = scoreRange ? scoreRange.status : "";
+
+                // STEP 5: Generate detailed feedback
+                const detailFeedback = this.generateDetailedFeedback(
+                    matchedKeywords,
+                    missedKeywords,
+                    percentage
+                );
+
+                return {
+                    score: finalScore,
+                    percentage: Math.round(percentage),
+                    status: status,
+                    feedback: feedback,
+                    detailFeedback: detailFeedback,
+                    matched: matchedKeywords,
+                    missed: missedKeywords,
+                    totalKeywords: correctKeywords.length,
+                    matchedCount: matchedKeywords.length,
+                    details: {
+                        totalScore: totalScore,
+                        exactMatches: matchedKeywords.filter(m => !m.partial && m.type === 'full').length,
+                        partialMatches: matchedKeywords.filter(m => m.type === 'partial').length
+                    }
+                };
+            },
+
+            // ===== EKSTRAKSI KATA KUNCI =====
+            extractKeywords(text) {
+                if (!text) return [];
+
+                // Lowercase dan hapus tanda baca
+                let normalized = text.toLowerCase()
+                    .replace(/[^\w\s]/g, '')  // Hapus tanda baca
+                    .replace(/\s+/g, ' ')      // Multiple spaces jadi single
+                    .trim();
+
+                // Split menjadi kata-kata
+                const words = normalized.split(' ').filter(w => w.length > 2);
+
+                // Hapus stopwords
+                const keywords = words.filter(
+                    word => !this.config.stopwords.includes(word)
+                );
+
+                // Hapus duplikat dan return
+                return [...new Set(keywords)];
+            },
+
+            // ===== HITUNG SIMILARITY DENGAN TYPO TOLERANCE =====
+            calculateSimilarity(str1, str2) {
+                const len1 = str1.length;
+
+                // Tentukan max typo berdasarkan panjang kata
+                let maxTypo;
+                if (len1 <= this.config.typoTolerance.minLength) {
+                    maxTypo = 0;
+                } else if (len1 <= this.config.typoTolerance.shortWord) {
+                    maxTypo = 1;
+                } else if (len1 <= this.config.typoTolerance.mediumWord) {
+                    maxTypo = 2;
+                } else {
+                    maxTypo = 3;
+                }
+
+                // Hitung Levenshtein distance
+                const distance = this.levenshteinDistance(str1, str2);
+
+                // Jika melebihi tolerance, tidak match
+                if (distance > maxTypo) {
+                    return 0;
+                }
+
+                // Hitung similarity
+                const maxLength = Math.max(len1, str2.length);
+                const similarity = 1 - (distance / maxLength);
+
+                return similarity;
+            },
+
+            // ===== LEVENSHTEIN DISTANCE =====
+            levenshteinDistance(str1, str2) {
+                const m = str1.length;
+                const n = str2.length;
+                const dp = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
+
+                for (let i = 0; i <= m; i++) dp[i][0] = i;
+                for (let j = 0; j <= n; j++) dp[0][j] = j;
+
+                for (let i = 1; i <= m; i++) {
+                    for (let j = 1; j <= n; j++) {
+                        if (str1[i - 1] === str2[j - 1]) {
+                            dp[i][j] = dp[i - 1][j - 1];
+                        } else {
+                            dp[i][j] = 1 + Math.min(
+                                dp[i - 1][j],      // Delete
+                                dp[i][j - 1],      // Insert
+                                dp[i - 1][j - 1]   // Replace
+                            );
+                        }
+                    }
+                }
+
+                return dp[m][n];
+            },
+
+            // ===== GENERATE DETAILED FEEDBACK =====
+            generateDetailedFeedback(matchedKeywords, missedKeywords, percentage) {
+                let feedback = "";
+
+                // Highlight kata yang cocok
+                if (matchedKeywords.length > 0) {
+                    const exactMatches = matchedKeywords.filter(m => m.type === 'full');
+                    const partialMatches = matchedKeywords.filter(m => m.type === 'partial');
+
+                    feedback += `<strong>Kata yang cocok:</strong> ${exactMatches.map(m => m.student).join(', ')}`;
+                    if (partialMatches.length > 0) {
+                        feedback += ` (hampir: ${partialMatches.map(m => m.student).join(', ')})`;
+                    }
+                }
+
+                // Highlight kata yang kurang
+                if (missedKeywords.length > 0) {
+                    if (feedback) feedback += "<br><br>";
+                    feedback += `<strong>Kata yang kurang:</strong> ${missedKeywords.join(', ')}`;
+                }
+
+                // Persentase
+                if (feedback) feedback += "<br><br>";
+                feedback += `<strong>Persentase:</strong> ${Math.round(percentage)}% kata kunci yang cocok`;
+
+                return feedback;
             }
         };
 
@@ -1045,6 +2232,7 @@
             selectedExamCode: null,
             violationCount: 0, // Replaces fullscreenViolations
             lastQuestionData: { semester: '', tahunAjaran: '' }, // To store last used question data for teacher
+            pendingGradeUpdates: {}, // Key: "studentName|examCode", Value: {nilai, grade, keterangan}
             filters: {
                 questions: { kelas: '', mataPelajaran: '', kode: '' },
                 results: { kodesoal: '', mataPelajaran: '', kelas: '', namaLengkap: '' },
@@ -1100,7 +2288,7 @@
         // =================================================================
         // GOOGLE SCRIPT HELPER
         // =================================================================
-        const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwZmG_ofWF2kQwrm9b_-yw1ZA4hXEum9pCG7qfIBs2jjjutWx2wzRww2o-Us6HG0eny6A/exec';
+        const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbz8IijAECrrQ5hFSY2yoa6yapLUR0Z7QDtXexxiC2nsQN6yQKQjCFEbY_Ka_K2D2CXi/exec';
 
         async function callGoogleScript(method = 'GET', params = {}) {
             const url = new URL(SCRIPT_URL);
@@ -1559,11 +2747,21 @@
 
             unblockStudent(blockId) {
                 UI.showConfirmModal('Konfirmasi Buka Blokir', 'Anda yakin ingin membuka blokir siswa ini?', async () => {
+                    Swal.fire({
+                        title: 'Memproses...',
+                        text: 'Sedang membuka blokir siswa.',
+                        allowOutsideClick: false,
+                        didOpen: () => { Swal.showLoading(); }
+                    });
                     try {
                         await DataService.unblockStudent(blockId);
+                        // Force refresh from server to ensure UI is in sync
+                        await DataService.getBlockedStudents(true);
+                        Swal.close();
                         UI.showNotification('Blokir siswa berhasil dibuka!', 'success');
                         UI.renderBlockedStudents();
                     } catch (error) {
+                        Swal.close();
                         console.error("Error unblocking student: ", error);
                         UI.showNotification('Gagal membuka blokir siswa!', 'error');
                     }
@@ -1580,6 +2778,8 @@
                     });
                     try {
                         await DataService.unblockAllStudents();
+                        // Force refresh from server to ensure UI is in sync
+                        await DataService.getBlockedStudents(true);
                         Swal.close();
                         UI.showNotification('Semua blokir siswa berhasil dibuka!', 'success');
                         UI.renderBlockedStudents();
@@ -1998,11 +3198,11 @@
                     console.log('[Delete] Deleting question with ID:', id);
                     
                     // OPTIMISTIC UI: Remove item from ALL cache entries containing this question
-                    AppState.cache.data.forEach((value, key) => {
-                        if (key.startsWith('questions') && Array.isArray(value)) {
-                            const index = value.findIndex(q => q.id === id);
+                    Object.keys(AppState.cache._data).forEach(key => {
+                        if (key.startsWith('questions') && Array.isArray(AppState.cache._data[key])) {
+                            const index = AppState.cache._data[key].findIndex(q => q.id === id);
                             if (index !== -1) {
-                                value.splice(index, 1);
+                                AppState.cache._data[key].splice(index, 1);
                             }
                         }
                     });
@@ -2028,19 +3228,48 @@
                 });
             },
 
-            renderFilteredQuestions(questions) {
-                AppState.currentlyDisplayed.questions = questions; 
+            renderFilteredQuestions(questions, allQuestions = null, startIndex = 0) {
+                AppState.currentlyDisplayed.questions = questions;
                 const questionsList = document.getElementById('questionsList');
                 if (!questionsList) return;
 
-                questionsList.innerHTML = questions.length === 0 ?
+                // If displayNumber already exists (from renderQuestionsFromCache), use it directly
+                // Otherwise calculate locally (fallback for direct calls)
+                let questionsWithNumbers = questions;
+                if (!questions[0]?.displayNumber) {
+                    let currentSubject = null;
+                    let subjectQuestionNumber = 0;
+                    questionsWithNumbers = questions.map((question) => {
+                        if (question.mataPelajaran !== currentSubject) {
+                            currentSubject = question.mataPelajaran;
+                            subjectQuestionNumber = 1;
+                        } else {
+                            subjectQuestionNumber++;
+                        }
+                        return { ...question, displayNumber: subjectQuestionNumber };
+                    });
+                }
+
+                questionsList.innerHTML = questionsWithNumbers.length === 0 ?
                     '<div class="bg-white rounded-lg shadow p-6 text-center text-gray-500">Tidak ada soal yang sesuai dengan filter</div>' :
-                    questions.map((question, index) => {
-                        const canEdit = AppState.currentUser.role === 'admin' || 
+                    questionsWithNumbers.map((question, index) => {
+                        const canEdit = AppState.currentUser.role === 'admin' ||
                                       (question.createdBy && question.createdBy === AppState.currentUser.nama) ||
                                       (!question.createdBy && AppState.currentUser.role === 'guru');
 
+                        // Show subject header when subject changes
+                        // Check previous question in full list (allQuestions) for correct header on page boundaries
+                        const globalIndex = startIndex + index;
+                        const prevQuestion = globalIndex > 0 && allQuestions ? allQuestions[globalIndex - 1] : (index > 0 ? questionsWithNumbers[index - 1] : null);
+                        const showSubjectHeader = !prevQuestion || prevQuestion.mataPelajaran !== question.mataPelajaran;
+                        const subjectHeader = showSubjectHeader ? `
+                            <div class="bg-gradient-to-r from-blue-600 to-teal-500 text-white rounded-lg shadow p-4 mb-4">
+                                <h3 class="text-lg font-bold"><i class="fas fa-book mr-2"></i>${question.mataPelajaran}</h3>
+                            </div>
+                        ` : '';
+
                         return `
+                        ${subjectHeader}
                         <div class="bg-white rounded-lg shadow p-6">
                             <div class="flex justify-between items-start">
                                 <div class="flex-1">
@@ -2051,7 +3280,7 @@
                                         <span class="text-xs text-gray-500">Kode: ${question.kode}</span>
                                         <span class="text-xs text-gray-400">Dibuat oleh: ${question.createdBy || '-'}</span>
                                     </div>
-                                    <h4 class="font-medium text-gray-900 mb-2">Soal No. ${index + 1 + (AppState.pagination.questions.currentPage - 1) * AppState.itemsPerPage}</h4>
+                                    <h4 class="font-medium text-gray-900 mb-2">Soal No. ${question.displayNumber}</h4>
                                     <p class="text-gray-700 mb-3">${(question.pertanyaan || '').length > 100 ? (question.pertanyaan || '').substring(0, 100) + '...' : (question.pertanyaan || '')}</p>
                                 </div>
                                 <div class="flex space-x-3 ml-4">
@@ -2344,39 +3573,159 @@
                     const resultId = form.id.value;
                     const newNilai = parseInt(form.nilai.value);
                     const newStatus = newNilai > 0 ? 'benar' : 'salah';
+                    const oldNilai = result.nilai || 0;
+                    const studentName = result.namaLengkap;
+                    const examCode = result.kodesoal;
                     
-                    // OPTIMISTIC UI: Close modal & update UI immediately
+                    // OPTIMISTIC UI: Close modal immediately
                     UI.hideModal();
                     
-                    // Update cache immediately for instant UI
-                    const cachedResults = AppState.cache.get(cacheKey);
-                    if (cachedResults) {
-                        const idx = cachedResults.findIndex(r => r.resultId === resultId);
-                        if (idx !== -1) {
-                            cachedResults[idx].nilai = newNilai;
-                            cachedResults[idx].status = newStatus;
+                    // === STEP 1: Update UI Hasil Ujian LANGSUNG via DOM ===
+                    const resultRow = document.querySelector(`tr[data-result-id="${resultId}"]`);
+                    if (resultRow) {
+                        const nilaiCell = resultRow.querySelector('.result-nilai');
+                        const statusCell = resultRow.querySelector('.result-status');
+                        if (nilaiCell) nilaiCell.textContent = newNilai;
+                        if (statusCell) {
+                            statusCell.textContent = newStatus;
+                            statusCell.className = `result-status px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${newStatus === 'benar' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`;
                         }
                     }
                     
-                    // Refresh UI instantly (from updated cache)
-                    document.getElementById('applyResultFilterBtn').click();
+                    // === STEP 2: Hitung ulang grade dan SIMPAN PENDING UPDATE ===
+                    // studentName dan examCode sudah dideklarasikan di atas
                     
-                    // BACKGROUND: Sync to server (fire and forget)
+                    // Ambil semua results dari tabel yang sedang ditampilkan
+                    const allResultRows = document.querySelectorAll('#resultsTableBody tr[data-result-id]');
+                    let totalScore = 0;
+                    let countResults = 0;
+                    
+                    allResultRows.forEach(row => {
+                        const rowStudent = row.getAttribute('data-student');
+                        const rowExam = row.getAttribute('data-exam');
+                        if (rowStudent === studentName && rowExam === examCode) {
+                            const nilaiCell = row.querySelector('.result-nilai');
+                            const statusCell = row.querySelector('.result-status');
+                            const nilai = parseInt(nilaiCell?.textContent) || 0;
+                            const status = statusCell?.textContent?.trim();
+                            
+                            if (status !== 'perlu dinilai') {
+                                totalScore += nilai;
+                            }
+                            countResults++;
+                        }
+                    });
+                    
+                    // Jika tidak ada di DOM, gunakan cache
+                    if (countResults === 0) {
+                        const cachedResultsLocal = AppState.cache.get(cacheKey) || [];
+                        cachedResultsLocal.forEach(r => {
+                            if (r.namaLengkap === studentName && r.kodesoal === examCode) {
+                                // Update nilai jika ini adalah result yang diedit
+                                const nilai = (r.resultId === resultId) ? newNilai : (Number(r.nilai) || 0);
+                                const status = (r.resultId === resultId) ? newStatus : r.status;
+                                if (status !== 'perlu dinilai') {
+                                    totalScore += nilai;
+                                }
+                                countResults++;
+                            }
+                        });
+                    }
+                    
+                    // Get total questions
+                    const cachedQuestions = CacheHelper.getCached('questions') || [];
+                    const examQuestions = cachedQuestions.filter(q => q.kodesoal === examCode);
+                    const totalQuestions = examQuestions.length || countResults || 1;
+                    
+                    // Calculate final grade
+                    const finalScore = Math.round(totalScore / totalQuestions);
+                    const gradeValue = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
+                    const keterangan = finalScore >= 70 ? 'Lulus' : 'Tidak Lulus';
+                    
+                    // === SIMPAN PENDING GRADE UPDATE ===
+                    // Ini akan diterapkan ketika user membuka halaman Daftar Nilai
+                    const pendingKey = `${studentName}|${examCode}`;
+                    AppState.pendingGradeUpdates[pendingKey] = {
+                        nilai: finalScore,
+                        grade: gradeValue,
+                        keterangan: keterangan
+                    };
+                    console.log(`[PENDING UPDATE] Saved for ${studentName}: ${finalScore} (${gradeValue})`);
+                    
+                    // UPDATE DOM Daftar Nilai LANGSUNG jika ada di DOM
+                    const gradeRow = document.querySelector(`tr[data-student="${studentName}"][data-exam="${examCode}"]`);
+                    if (gradeRow) {
+                        const nilaiCell = gradeRow.querySelector('.grade-nilai');
+                        const gradeCell = gradeRow.querySelector('.grade-grade');
+                        const ketCell = gradeRow.querySelector('.grade-keterangan');
+                        
+                        if (nilaiCell) nilaiCell.textContent = finalScore;
+                        if (gradeCell) {
+                            const gradeClass = gradeValue === 'A' ? 'bg-green-100 text-green-800' : 
+                                              gradeValue === 'B' ? 'bg-blue-100 text-blue-800' : 
+                                              gradeValue === 'C' ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800';
+                            gradeCell.innerHTML = `<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${gradeClass}">${gradeValue}</span>`;
+                        }
+                        if (ketCell) ketCell.textContent = keterangan;
+                        
+                        console.log(`[DOM UPDATE] Grade di tabel: ${studentName} = ${finalScore} (${gradeValue})`);
+                    }
+                    
+                    // === STEP 3: Update Cache untuk konsistensi ===
+                    try {
+                        // Update results cache
+                        const globalResults = CacheHelper.getCached('results') || [];
+                        const globalIdx = globalResults.findIndex(r => r.resultId === resultId);
+                        if (globalIdx !== -1) {
+                            globalResults[globalIdx].nilai = newNilai;
+                            globalResults[globalIdx].status = newStatus;
+                            AppState.cache.set('results', { data: globalResults, timestamp: Date.now(), valid: true });
+                        }
+                        
+                        // Update filtered results cache
+                        const cachedResultsFiltered = AppState.cache.get(cacheKey);
+                        if (cachedResultsFiltered) {
+                            const idx = cachedResultsFiltered.findIndex(r => r.resultId === resultId);
+                            if (idx !== -1) {
+                                cachedResultsFiltered[idx].nilai = newNilai;
+                                cachedResultsFiltered[idx].status = newStatus;
+                            }
+                        }
+                        
+                        // Update grades cache
+                        const globalGrades = CacheHelper.getCached('grades') || [];
+                        const gradeIdx = globalGrades.findIndex(g => g.namaSiswa === studentName && g.kodeSoal === examCode);
+                        if (gradeIdx !== -1) {
+                            globalGrades[gradeIdx].nilai = finalScore;
+                            globalGrades[gradeIdx].grade = gradeValue;
+                            globalGrades[gradeIdx].keterangan = keterangan;
+                            AppState.cache.set('grades', { data: globalGrades, timestamp: Date.now(), valid: true });
+                            
+                            // Queue for background sync
+                            BackgroundSync.queueOperation('update', 'grades', {
+                                ...globalGrades[gradeIdx],
+                                gradeId: globalGrades[gradeIdx].gradeId,
+                                namaSiswa: studentName,
+                                kodeSoal: examCode
+                            });
+                        }
+                    } catch (cacheError) {
+                        console.warn('[Cache Update] Warning:', cacheError);
+                    }
+                    
+                    // === STEP 4: BACKGROUND Sync result to server ===
                     callGoogleScript('POST', {
                         action: 'updateResult',
                         data: { resultId: resultId, nilai: newNilai, status: newStatus }
                     }).then(response => {
                         if (response.status === 'success') {
-                            console.log('[Sync] Result updated on server');
-                            // Recalculate grade in background
-                            this.recalculateFinalGradeAsync(result.namaLengkap, result.kodesoal, newNilai);
+                            console.log('[Server Sync] Result updated on server');
                         } else {
-                            console.error('[Sync] Failed:', response.message);
+                            console.error('[Server Sync] Failed:', response.message);
                             UI.showNotification('Gagal sync ke server', 'warning');
                         }
                     }).catch(err => {
-                        console.error('[Sync] Error:', err);
-                        UI.showNotification('Gagal sync ke server', 'warning');
+                        console.error('[Server Sync] Error:', err);
                     });
                 });
             },
@@ -2386,11 +3735,11 @@
                     console.log('[Delete] Deleting result with ID:', id);
                     
                     // OPTIMISTIC UI: Remove item from ALL cache entries containing this result
-                    AppState.cache.data.forEach((value, key) => {
-                        if (key.startsWith('results') && Array.isArray(value)) {
-                            const index = value.findIndex(r => r.resultId === id);
+                    Object.keys(AppState.cache._data).forEach(key => {
+                        if (key.startsWith('results') && Array.isArray(AppState.cache._data[key])) {
+                            const index = AppState.cache._data[key].findIndex(r => r.resultId === id);
                             if (index !== -1) {
-                                value.splice(index, 1);
+                                AppState.cache._data[key].splice(index, 1);
                             }
                         }
                     });
@@ -2447,7 +3796,7 @@
                             `;
                         }
                         return `
-                        <tr>
+                        <tr data-result-id="${resultId}" data-student="${result.namaLengkap}" data-exam="${result.kodesoal}">
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${index + 1 + (AppState.pagination.results.currentPage - 1) * AppState.itemsPerPage}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${result.kelas}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${result.kodesoal}</td>
@@ -2456,9 +3805,9 @@
                             <td class="px-6 py-4 text-sm text-gray-900 max-w-xs truncate">${result.pertanyaan}</td>
                             <td class="px-6 py-4 text-sm text-gray-900 max-w-xs truncate">${result.jawabanSiswa}</td>
                             <td class="px-6 py-4 whitespace-nowrap">
-                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${result.status === 'benar' ? 'bg-green-100 text-green-800' : result.status === 'salah' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}">${result.status}</span>
+                                <span class="result-status px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${result.status === 'benar' ? 'bg-green-100 text-green-800' : result.status === 'salah' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}">${result.status}</span>
                             </td>
-                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${result.nilai}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 result-nilai">${result.nilai}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
                                 ${actionButtons}
                             </td>
@@ -2514,11 +3863,19 @@
                                     if (questionResult.status !== 'success' || questionResult.data.length === 0) continue;
 
                                     let questions = questionResult.data;
+                                    // Sort by: 1. Mata Pelajaran, 2. Tipe (PG → Isian/Essai → Uraian), 3. Creation time
                                     const typeOrder = { 'pilihan_ganda': 1, 'isian': 2, 'uraian': 3 };
                                     questions.sort((a, b) => {
+                                        // 1. Sort by mataPelajaran first
+                                        const mataPelajaranCompare = (a.mataPelajaran || '').localeCompare(b.mataPelajaran || '', 'id-ID');
+                                        if (mataPelajaranCompare !== 0) return mataPelajaranCompare;
+
+                                        // 2. Sort by tipe (pilihan_ganda → isian → uraian)
                                         const typeA = typeOrder[a.tipe] || 99;
                                         const typeB = typeOrder[b.tipe] || 99;
                                         if (typeA !== typeB) return typeA - typeB;
+
+                                        // 3. Sort by creation time
                                         const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
                                         const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
                                         return timeA - timeB;
@@ -2531,7 +3888,11 @@
                                 if (!question || !question.jawabanBenar) continue;
 
                                 // Gunakan TextSimilarity sebagai pengganti AI
-                                const gradingResult = TextSimilarity.gradeAnswer(result.jawabanSiswa, question.jawabanBenar);
+                                // Untuk SD (Kelas 4-6), gunakan sistem penilaian SD yang lebih longgar
+                                const isSDClass = ['4A', '4B', '4C', '4D', '5A', '5B', '6A', '6B'].includes(result.kelas);
+                                const gradingResult = isSDClass
+                                    ? SDGrading.gradeAnswerForSD(result.jawabanSiswa, question.jawabanBenar)
+                                    : TextSimilarity.gradeAnswer(result.jawabanSiswa, question.jawabanBenar);
 
                                 if (gradingResult) {
                                     const newNilai = gradingResult.nilai;
@@ -2603,11 +3964,19 @@
                     }
                     
                     let questions = questionResult.data;
+                    // Sort by: 1. Mata Pelajaran, 2. Tipe (PG → Isian/Essai → Uraian), 3. Creation time
                     const typeOrder = { 'pilihan_ganda': 1, 'isian': 2, 'uraian': 3 };
                     questions.sort((a, b) => {
+                        // 1. Sort by mataPelajaran first
+                        const mataPelajaranCompare = (a.mataPelajaran || '').localeCompare(b.mataPelajaran || '', 'id-ID');
+                        if (mataPelajaranCompare !== 0) return mataPelajaranCompare;
+
+                        // 2. Sort by tipe (pilihan_ganda → isian → uraian)
                         const typeA = typeOrder[a.tipe] || 99;
                         const typeB = typeOrder[b.tipe] || 99;
                         if (typeA !== typeB) return typeA - typeB;
+
+                        // 3. Sort by creation time
                         const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
                         const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
                         return timeA - timeB;
@@ -2617,7 +3986,11 @@
                     if (!question || !question.jawabanBenar) throw new Error(`Kunci jawaban untuk soal no. ${resultData.noSoal} tidak ditemukan.`);
                     
                     // Gunakan TextSimilarity sebagai pengganti AI
-                    const gradingResult = TextSimilarity.gradeAnswer(resultData.jawabanSiswa, question.jawabanBenar);
+                    // Untuk SD (Kelas 4-6), gunakan sistem penilaian SD yang lebih longgar
+                    const isSDClass = ['4A', '4B', '4C', '4D', '5A', '5B', '6A', '6B'].includes(resultData.kelas);
+                    const gradingResult = isSDClass
+                        ? SDGrading.gradeAnswerForSD(resultData.jawabanSiswa, question.jawabanBenar)
+                        : TextSimilarity.gradeAnswer(resultData.jawabanSiswa, question.jawabanBenar);
                     if (!gradingResult) throw new Error("Gagal mendapatkan nilai.");
                     
                     const newNilai = gradingResult.nilai;
@@ -2645,16 +4018,36 @@
 
             async recalculateFinalGrade(studentName, examCode) {
                 try {
-                    // Get results from server
-                    const studentResults = await DataService.getResults({ namaLengkap: studentName, kodesoal: examCode });
+                    // OPTIMISTIC: Gunakan cache lokal dulu untuk instant response
+                    let studentResults = [];
+                    const cachedResults = CacheHelper.getCached('results') || [];
+                    studentResults = cachedResults.filter(r => 
+                        r.namaLengkap === studentName && r.kodesoal === examCode
+                    );
+                    
+                    // Fallback ke IndexedDB jika cache kosong
+                    if (studentResults.length === 0) {
+                        const idbResults = await IndexedDBService.getAll('results');
+                        studentResults = idbResults.filter(r => 
+                            r.namaLengkap === studentName && r.kodesoal === examCode
+                        );
+                    }
             
                     if (!studentResults || studentResults.length === 0) {
                         console.warn('No results found for recalculation.');
                         return;
                     }
 
-                    // Fetch total questions from DataService
-                    const questions = await DataService.getQuestions(examCode);
+                    // OPTIMISTIC: Gunakan questions dari cache
+                    let questions = [];
+                    const cachedQuestions = CacheHelper.getCached('questions') || [];
+                    questions = cachedQuestions.filter(q => q.kodesoal === examCode);
+                    
+                    if (questions.length === 0) {
+                        const idbQuestions = await IndexedDBService.getAll('questions');
+                        questions = idbQuestions.filter(q => q.kodesoal === examCode);
+                    }
+                    
                     if (!questions || questions.length === 0) return;
                     const totalQuestionsForExam = questions.length;
 
@@ -2668,24 +4061,33 @@
                     const finalScore = Math.round(totalScore / totalQuestionsForExam);
                     const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     
-                    // Find existing grade - read from server
-                    const allGrades = await DataService.getGrades({ namaSiswa: studentName, kodeSoal: examCode });
-                    const existingGrades = allGrades.filter(g => 
+                    // OPTIMISTIC: Cari grade dari cache lokal
+                    let existingGrade = null;
+                    const cachedGrades = CacheHelper.getCached('grades') || [];
+                    existingGrade = cachedGrades.find(g => 
                         g.namaSiswa === studentName && g.kodeSoal === examCode
                     );
+                    
+                    // Fallback ke IndexedDB
+                    if (!existingGrade) {
+                        const idbGrades = await IndexedDBService.getAll('grades');
+                        existingGrade = idbGrades.find(g => 
+                            g.namaSiswa === studentName && g.kodeSoal === examCode
+                        );
+                    }
 
-                    if (existingGrades && existingGrades.length > 0) {
-                        const existingGrade = existingGrades[0];
+                    if (existingGrade) {
                         await DataService.updateGrade({
+                            ...existingGrade,
                             gradeId: existingGrade.gradeId,
+                            id: existingGrade.id || existingGrade.gradeId,
+                            namaSiswa: studentName,
+                            kodeSoal: examCode,
                             nilai: finalScore,
                             grade: grade,
                             keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
                         });
-                        console.log(`Final grade updated for ${studentName} on exam ${examCode}. New score: ${finalScore}`);
-                        
-                        // Clear grades cache to ensure fresh data on next view
-                        AppState.cache.delete('grades');
+                        console.log(`[OPTIMISTIC] Final grade updated for ${studentName} on exam ${examCode}. New score: ${finalScore}`);
                     }
                 } catch (error) {
                     console.error(`Failed to recalculate final grade for ${studentName}:`, error);
@@ -2695,19 +4097,36 @@
             // Synchronous version that updates server directly (for edit operations)
             async recalculateFinalGradeSync(studentName, examCode) {
                 try {
-                    // Read from server
-                    const allResults = await DataService.getResults({ namaLengkap: studentName, kodesoal: examCode });
-                    const studentResults = allResults.filter(r => 
+                    // OPTIMISTIC: Gunakan cache lokal dulu untuk instant response
+                    let studentResults = [];
+                    const cachedResults = CacheHelper.getCached('results') || [];
+                    studentResults = cachedResults.filter(r => 
                         r.namaLengkap === studentName && r.kodesoal === examCode
                     );
+                    
+                    // Fallback ke IndexedDB jika cache kosong
+                    if (studentResults.length === 0) {
+                        const idbResults = await IndexedDBService.getAll('results');
+                        studentResults = idbResults.filter(r => 
+                            r.namaLengkap === studentName && r.kodesoal === examCode
+                        );
+                    }
             
                     if (!studentResults || studentResults.length === 0) {
                         console.warn('No results found for recalculation.');
                         return;
                     }
 
-                    // Fetch total questions from DataService
-                    const questions = await DataService.getQuestions(examCode);
+                    // OPTIMISTIC: Gunakan questions dari cache
+                    let questions = [];
+                    const cachedQuestions = CacheHelper.getCached('questions') || [];
+                    questions = cachedQuestions.filter(q => q.kodesoal === examCode);
+                    
+                    if (questions.length === 0) {
+                        const idbQuestions = await IndexedDBService.getAll('questions');
+                        questions = idbQuestions.filter(q => q.kodesoal === examCode);
+                    }
+                    
                     if (!questions || questions.length === 0) return;
                     const totalQuestionsForExam = questions.length;
 
@@ -2721,42 +4140,71 @@
                     const finalScore = Math.round(totalScore / totalQuestionsForExam);
                     const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     
-                    // Find existing grade from server
-                    const allGrades = await DataService.getGrades({ namaSiswa: studentName, kodeSoal: examCode });
-                    const existingGrades = allGrades.filter(g => 
+                    // OPTIMISTIC: Cari grade dari cache lokal
+                    let existingGrade = null;
+                    const cachedGrades = CacheHelper.getCached('grades') || [];
+                    existingGrade = cachedGrades.find(g => 
                         g.namaSiswa === studentName && g.kodeSoal === examCode
                     );
+                    
+                    // Fallback ke IndexedDB
+                    if (!existingGrade) {
+                        const idbGrades = await IndexedDBService.getAll('grades');
+                        existingGrade = idbGrades.find(g => 
+                            g.namaSiswa === studentName && g.kodeSoal === examCode
+                        );
+                    }
 
-                    if (existingGrades && existingGrades.length > 0) {
-                        const existingGrade = existingGrades[0];
-                        
-                        // Update to SERVER
+                    if (existingGrade) {
+                        // Update dengan DataService (sudah optimistic)
                         await DataService.updateGrade({
+                            ...existingGrade,
                             gradeId: existingGrade.gradeId,
+                            id: existingGrade.id || existingGrade.gradeId,
+                            namaSiswa: studentName,
+                            kodeSoal: examCode,
                             nilai: finalScore,
                             grade: grade,
                             keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
                         });
                         
-                        console.log(`Final grade synced for ${studentName} on exam ${examCode}. New score: ${finalScore}`);
-                        
-                        // Clear grades cache
-                        AppState.cache.delete('grades');
+                        console.log(`[OPTIMISTIC] Final grade synced for ${studentName} on exam ${examCode}. New score: ${finalScore}`);
                     }
                 } catch (error) {
                     console.error(`Failed to recalculate and sync final grade for ${studentName}:`, error);
                 }
             },
 
-            // Async version for background processing (non-blocking)
+            // Async version for background processing (non-blocking) - FULLY OPTIMISTIC
             async recalculateFinalGradeAsync(studentName, examCode, newNilai) {
                 try {
-                    // Read from server
-                    const studentResults = await DataService.getResults({ namaLengkap: studentName, kodesoal: examCode });
+                    // OPTIMISTIC: Gunakan cache lokal dulu untuk instant response
+                    let studentResults = [];
+                    const cachedResults = CacheHelper.getCached('results') || [];
+                    studentResults = cachedResults.filter(r => 
+                        r.namaLengkap === studentName && r.kodesoal === examCode
+                    );
+                    
+                    // Fallback ke IndexedDB jika cache kosong
+                    if (studentResults.length === 0) {
+                        const idbResults = await IndexedDBService.getAll('results');
+                        studentResults = idbResults.filter(r => 
+                            r.namaLengkap === studentName && r.kodesoal === examCode
+                        );
+                    }
             
                     if (!studentResults || studentResults.length === 0) return;
 
-                    const questions = await DataService.getQuestions(examCode);
+                    // OPTIMISTIC: Gunakan questions dari cache
+                    let questions = [];
+                    const cachedQuestions = CacheHelper.getCached('questions') || [];
+                    questions = cachedQuestions.filter(q => q.kodesoal === examCode);
+                    
+                    if (questions.length === 0) {
+                        const idbQuestions = await IndexedDBService.getAll('questions');
+                        questions = idbQuestions.filter(q => q.kodesoal === examCode);
+                    }
+                    
                     if (!questions || questions.length === 0) return;
                     const totalQuestionsForExam = questions.length;
 
@@ -2770,24 +4218,42 @@
                     const finalScore = Math.round(totalScore / totalQuestionsForExam);
                     const grade = finalScore >= 90 ? 'A' : finalScore >= 80 ? 'B' : finalScore >= 70 ? 'C' : finalScore >= 60 ? 'D' : 'E';
                     
-                    const allGrades = await DataService.getGrades({ namaSiswa: studentName, kodeSoal: examCode });
-                    const existingGrades = allGrades.filter(g => 
+                    // OPTIMISTIC: Cari grade dari cache lokal
+                    let existingGrade = null;
+                    const cachedGrades = CacheHelper.getCached('grades') || [];
+                    existingGrade = cachedGrades.find(g => 
                         g.namaSiswa === studentName && g.kodeSoal === examCode
                     );
+                    
+                    // Fallback ke IndexedDB (bukan server)
+                    if (!existingGrade) {
+                        const idbGrades = await IndexedDBService.getAll('grades');
+                        existingGrade = idbGrades.find(g => 
+                            g.namaSiswa === studentName && g.kodeSoal === examCode
+                        );
+                    }
 
-                    if (existingGrades && existingGrades.length > 0) {
-                        const existingGrade = existingGrades[0];
-                        
-                        // Update grade to server
+                    if (existingGrade) {
+                        // Update grade dengan data lengkap - PASTIKAN namaSiswa dan kodeSoal dikirim
                         await DataService.updateGrade({
+                            ...existingGrade,  // Include semua field existing
                             gradeId: existingGrade.gradeId,
+                            id: existingGrade.id || existingGrade.gradeId,
+                            namaSiswa: studentName,
+                            kodeSoal: examCode,
                             nilai: finalScore,
                             grade: grade,
                             keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus'
                         });
                         
-                        AppState.cache.delete('grades');
-                        console.log(`Grade synced for ${studentName}: ${finalScore}`);
+                        console.log(`[OPTIMISTIC] Updated ${studentName}: ${finalScore} (${grade})`);
+                        
+                        // PENTING: Force refresh UI Daftar Nilai
+                        if (typeof UI !== 'undefined' && typeof UI.refreshGradesUIIfVisible === 'function') {
+                            UI.refreshGradesUIIfVisible();
+                        }
+                    } else {
+                        console.warn(`[OPTIMISTIC] No existing grade found for ${studentName} on ${examCode}`);
                     }
                 } catch (error) {
                     console.error(`Failed to recalculate grade async for ${studentName}:`, error);
@@ -2855,31 +4321,26 @@
                     const newGrade = newNilai >= 90 ? 'A' : newNilai >= 80 ? 'B' : newNilai >= 70 ? 'C' : newNilai >= 60 ? 'D' : 'E';
                     const newKeterangan = newNilai >= 70 ? 'Lulus' : 'Tidak Lulus';
 
-                    // OPTIMISTIC UI: Close modal immediately
+                    // 1. OPTIMISTIC UI: Update cache langsung
+                    const updatedGradeData = {
+                        ...grade,
+                        gradeId: gradeId,
+                        id: grade.id || gradeId,
+                        nilai: newNilai,
+                        grade: newGrade,
+                        keterangan: newKeterangan
+                    };
+                    
+                    // 2. Gunakan DataService yang sudah pakai queue pattern
+                    await DataService.updateGrade(updatedGradeData);
+                    
+                    // 3. Close modal
                     UI.hideModal();
                     
-                    // Clear cache and refresh UI instantly
-                    AppState.cache.clear();
-                    document.getElementById('applyGradeFilterBtn').click();
+                    // 4. Refresh UI langsung dari cache (yang sudah diupdate oleh DataService)
+                    UI.loadAndRenderPaginatedGrades(false);
                     
-                    // BACKGROUND: Sync to server (fire and forget)
-                    callGoogleScript('POST', {
-                        action: 'updateGrade',
-                        data: {
-                            gradeId: gradeId,
-                            nilai: newNilai,
-                            grade: newGrade,
-                            keterangan: newKeterangan
-                        }
-                    }).then(response => {
-                        if (response.status !== 'success') {
-                            console.error('[Sync] Failed:', response.message);
-                            UI.showNotification('Gagal sync ke server', 'warning');
-                        }
-                    }).catch(err => {
-                        console.error('[Sync] Error:', err);
-                        UI.showNotification('Gagal sync ke server', 'warning');
-                    });
+                    UI.showNotification('Nilai berhasil diupdate!', 'success');
                 });
             },
 
@@ -2888,11 +4349,11 @@
                     console.log('[Delete] Deleting grade with ID:', gradeId);
                     
                     // OPTIMISTIC UI: Remove item from ALL cache entries containing this grade
-                    AppState.cache.data.forEach((value, key) => {
-                        if (key.startsWith('grades') && Array.isArray(value)) {
-                            const index = value.findIndex(g => g.gradeId === gradeId);
+                    Object.keys(AppState.cache._data).forEach(key => {
+                        if (key.startsWith('grades') && Array.isArray(AppState.cache._data[key])) {
+                            const index = AppState.cache._data[key].findIndex(g => g.gradeId === gradeId);
                             if (index !== -1) {
-                                value.splice(index, 1);
+                                AppState.cache._data[key].splice(index, 1);
                             }
                         }
                     });
@@ -2923,17 +4384,17 @@
                 gradesTableBody.innerHTML = grades.length === 0 ?
                     '<tr><td colspan="10" class="px-6 py-4 text-center text-gray-500">Belum ada data nilai yang sesuai dengan filter</td></tr>' :
                     grades.map((grade, index) => `
-                        <tr>
+                        <tr data-grade-id="${grade.gradeId}" data-student="${grade.namaSiswa}" data-exam="${grade.kodeSoal}">
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${index + 1 + (AppState.pagination.grades.currentPage - 1) * AppState.itemsPerPage}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${grade.kelas}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${grade.namaSiswa}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${grade.kodeSoal}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${grade.mataPelajaran}</td>
-                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${grade.nilai}</td>
-                            <td class="px-6 py-4 whitespace-nowrap">
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 grade-nilai">${grade.nilai}</td>
+                            <td class="px-6 py-4 whitespace-nowrap grade-grade">
                                 <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${grade.grade === 'A' ? 'bg-green-100 text-green-800' : grade.grade === 'B' ? 'bg-blue-100 text-blue-800' : grade.grade === 'C' ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}">${grade.grade}</span>
                             </td>
-                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${grade.keterangan}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 grade-keterangan">${grade.keterangan}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${grade.waktuSelesai}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
                                 <button onclick="Management.viewGrade('${grade.gradeId}')" class="text-blue-600 hover:text-blue-900 mr-3">
@@ -3122,11 +4583,11 @@
                         const idsToDelete = questionsToDelete.map(q => q.id);
                         
                         // OPTIMISTIC UI: Remove items from ALL cache entries
-                        AppState.cache.data.forEach((value, key) => {
-                            if (key.startsWith('questions') && Array.isArray(value)) {
-                                for (let i = value.length - 1; i >= 0; i--) {
-                                    if (idsToDelete.includes(value[i].id)) {
-                                        value.splice(i, 1);
+                        Object.keys(AppState.cache._data).forEach(key => {
+                            if (key.startsWith('questions') && Array.isArray(AppState.cache._data[key])) {
+                                for (let i = AppState.cache._data[key].length - 1; i >= 0; i--) {
+                                    if (idsToDelete.includes(AppState.cache._data[key][i].id)) {
+                                        AppState.cache._data[key].splice(i, 1);
                                     }
                                 }
                             }
@@ -3175,11 +4636,11 @@
                         const resultIds = resultsToDelete.map(r => r.resultId);
                         
                         // OPTIMISTIC UI: Remove items from ALL cache entries
-                        AppState.cache.data.forEach((value, key) => {
-                            if (key.startsWith('results') && Array.isArray(value)) {
-                                for (let i = value.length - 1; i >= 0; i--) {
-                                    if (resultIds.includes(value[i].resultId)) {
-                                        value.splice(i, 1);
+                        Object.keys(AppState.cache._data).forEach(key => {
+                            if (key.startsWith('results') && Array.isArray(AppState.cache._data[key])) {
+                                for (let i = AppState.cache._data[key].length - 1; i >= 0; i--) {
+                                    if (resultIds.includes(AppState.cache._data[key][i].resultId)) {
+                                        AppState.cache._data[key].splice(i, 1);
                                     }
                                 }
                             }
@@ -3227,11 +4688,11 @@
                         const gradeIds = gradesToDelete.map(g => g.gradeId);
                         
                         // OPTIMISTIC UI: Remove items from ALL cache entries
-                        AppState.cache.data.forEach((value, key) => {
-                            if (key.startsWith('grades') && Array.isArray(value)) {
-                                for (let i = value.length - 1; i >= 0; i--) {
-                                    if (gradeIds.includes(value[i].gradeId)) {
-                                        value.splice(i, 1);
+                        Object.keys(AppState.cache._data).forEach(key => {
+                            if (key.startsWith('grades') && Array.isArray(AppState.cache._data[key])) {
+                                for (let i = AppState.cache._data[key].length - 1; i >= 0; i--) {
+                                    if (gradeIds.includes(AppState.cache._data[key][i].gradeId)) {
+                                        AppState.cache._data[key].splice(i, 1);
                                     }
                                 }
                             }
@@ -3499,12 +4960,39 @@
                 document.getElementById('dashboardInterface').classList.add('hidden');
                 document.getElementById('examLockModal').classList.remove('hidden');
 
+                // Reset modal to initial state
+                const examLockIcon = document.getElementById('examLockIcon');
+                const examLockTitle = document.getElementById('examLockTitle');
+                const examLockDesc = document.getElementById('examLockDesc');
+                const examLockRules = document.getElementById('examLockRules');
+
+                examLockIcon.className = 'fas fa-lock text-5xl text-blue-600 mb-6';
+                examLockTitle.textContent = 'Mode Ujian Terkunci';
+                examLockDesc.textContent = 'Anda akan memasuki mode ujian layar penuh.';
+                examLockRules.classList.remove('hidden');
+
                 const startBtn = document.getElementById('startFullscreenExamBtn');
-                
+                startBtn.disabled = false;
+                startBtn.innerHTML = '<i class="fas fa-play-circle mr-2"></i> Saya Mengerti & Mulai Ujian';
+
                 const newStartBtn = startBtn.cloneNode(true);
                 startBtn.parentNode.replaceChild(newStartBtn, startBtn);
-                
+
                 newStartBtn.addEventListener('click', async () => {
+                    // Show loading state
+                    const examLockIcon = document.getElementById('examLockIcon');
+                    const examLockTitle = document.getElementById('examLockTitle');
+                    const examLockDesc = document.getElementById('examLockDesc');
+                    const examLockRules = document.getElementById('examLockRules');
+                    const btn = document.getElementById('startFullscreenExamBtn');
+
+                    examLockIcon.className = 'fas fa-spinner fa-spin text-5xl text-blue-600 mb-6';
+                    examLockTitle.textContent = 'Memuat Soal Ujian...';
+                    examLockDesc.textContent = 'Mohon tunggu, sedang mempersiapkan soal ujian Anda.';
+                    examLockRules.classList.add('hidden');
+                    btn.disabled = true;
+                    btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> Memuat...';
+
                     try {
                         await document.documentElement.requestFullscreen();
                         // Wait for fullscreen to activate before showing the exam
@@ -3513,6 +5001,14 @@
                             UI.showExamInterface();
                         }, 200);
                     } catch (err) {
+                        // Reset to initial state on error
+                        examLockIcon.className = 'fas fa-lock text-5xl text-blue-600 mb-6';
+                        examLockTitle.textContent = 'Mode Ujian Terkunci';
+                        examLockDesc.textContent = 'Anda akan memasuki mode ujian layar penuh.';
+                        examLockRules.classList.remove('hidden');
+                        btn.disabled = false;
+                        btn.innerHTML = '<i class="fas fa-play-circle mr-2"></i> Saya Mengerti & Mulai Ujian';
+
                         UI.showNotification('Gagal masuk mode layar penuh. Silakan coba lagi atau aktifkan izin.', 'error');
                         console.error("Fullscreen request failed: ", err);
                     }
@@ -3747,45 +5243,65 @@
                         e.preventDefault();
                         const examCode = document.getElementById('examCode').value.trim();
                         const errorDiv = document.getElementById('examCodeError');
+                        const submitBtn = e.target.querySelector('button[type="submit"]');
                         const studentUsername = AppState.currentUser.username;
-                        
+
                         if (!examCode) {
                             errorDiv.textContent = 'Silakan masukkan kode soal!';
                             errorDiv.classList.remove('hidden');
                             return;
                         }
 
-                        // Arsitektur baru: Cek dari IndexedDB dulu
-                        const isBlocked = await DataService.isStudentBlocked(studentUsername, examCode);
-
-                        if (isBlocked) {
-                            errorDiv.textContent = 'Akses Anda ke soal ini diblokir. Hubungi admin untuk membuka blokir.';
-                            errorDiv.classList.remove('hidden');
-                            return;
-                        }
-                        
-                        // Check if exam code exists via Google Script
-                        const result = await callGoogleScript('GET', { action: 'getQuestions', kode: examCode });
-                        if (result.status !== 'success' || result.data.length === 0) {
-                             errorDiv.textContent = 'Kode soal tidak ditemukan!';
-                            errorDiv.classList.remove('hidden');
-                            return;
-                        }
-
-                        // New: Check if student's grade level matches exam's grade level
-                        const examData = result.data[0];
-                        const studentGrade = AppState.currentUser.kelas.charAt(0);
-                        const examGrade = examData.kelas.charAt(0);
-
-                        if (studentGrade !== examGrade) {
-                            errorDiv.textContent = 'Anda tidak diizinkan mengerjakan soal untuk kelas ini.';
-                            errorDiv.classList.remove('hidden');
-                            return;
-                        }
-                        
+                        // Show loading state
                         errorDiv.classList.add('hidden');
-                        AppState.selectedExamCode = examCode;
-                        UI.showExamLockScreen();
+                        submitBtn.disabled = true;
+                        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i><span class="font-semibold">Memuat Soal...</span>';
+
+                        try {
+                            // Arsitektur baru: Cek dari IndexedDB dulu
+                            const isBlocked = await DataService.isStudentBlocked(studentUsername, examCode);
+
+                            if (isBlocked) {
+                                errorDiv.textContent = 'Akses Anda ke soal ini diblokir. Hubungi admin untuk membuka blokir.';
+                                errorDiv.classList.remove('hidden');
+                                submitBtn.disabled = false;
+                                submitBtn.innerHTML = '<i class="fas fa-play"></i><span class="font-semibold">Mulai Ujian</span>';
+                                return;
+                            }
+
+                            // Check if exam code exists via Google Script
+                            const result = await callGoogleScript('GET', { action: 'getQuestions', kode: examCode });
+                            if (result.status !== 'success' || result.data.length === 0) {
+                                 errorDiv.textContent = 'Kode soal tidak ditemukan!';
+                                errorDiv.classList.remove('hidden');
+                                submitBtn.disabled = false;
+                                submitBtn.innerHTML = '<i class="fas fa-play"></i><span class="font-semibold">Mulai Ujian</span>';
+                                return;
+                            }
+
+                            // New: Check if student's grade level matches exam's grade level
+                            const examData = result.data[0];
+                            const studentGrade = AppState.currentUser.kelas.charAt(0);
+                            const examGrade = examData.kelas.charAt(0);
+
+                            if (studentGrade !== examGrade) {
+                                errorDiv.textContent = 'Anda tidak diizinkan mengerjakan soal untuk kelas ini.';
+                                errorDiv.classList.remove('hidden');
+                                submitBtn.disabled = false;
+                                submitBtn.innerHTML = '<i class="fas fa-play"></i><span class="font-semibold">Mulai Ujian</span>';
+                                return;
+                            }
+
+                            errorDiv.classList.add('hidden');
+                            AppState.selectedExamCode = examCode;
+                            UI.showExamLockScreen();
+                        } catch (error) {
+                            console.error('Error starting exam:', error);
+                            errorDiv.textContent = 'Terjadi kesalahan. Silakan coba lagi.';
+                            errorDiv.classList.remove('hidden');
+                            submitBtn.disabled = false;
+                            submitBtn.innerHTML = '<i class="fas fa-play"></i><span class="font-semibold">Mulai Ujian</span>';
+                        }
                     });
                 }
 
@@ -3813,73 +5329,121 @@
 
                 content.innerHTML = `
                     <div class="fade-in">
-                        <h2 class="text-2xl font-bold text-gray-900 mb-6">Pengaturan Ujian</h2>
-                        <div class="max-w-lg mx-auto bg-white rounded-lg shadow p-8">
-                            <form id="settingsForm">
-                                <div class="mb-6">
-                                    <label for="examDuration" class="block text-lg font-medium text-gray-700 mb-2">Durasi Waktu Ujian (menit)</label>
-                                    <p class="text-sm text-gray-500 mb-3">Atur berapa lama waktu yang dimiliki siswa untuk menyelesaikan ujian.</p>
+                        <h2 class="text-2xl font-bold text-gray-900 mb-6">Pengaturan</h2>
+
+                        <!-- Card 1: Pengaturan Ujian (Server) -->
+                        <div class="max-w-lg mx-auto bg-white rounded-lg shadow p-6 mb-6">
+                            <div class="flex items-center gap-3 mb-4">
+                                <div class="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
+                                    <i class="fas fa-clock text-blue-600"></i>
+                                </div>
+                                <div>
+                                    <h3 class="text-lg font-semibold text-gray-900">Pengaturan Waktu Ujian</h3>
+                                    <p class="text-xs text-gray-500"><i class="fas fa-cloud mr-1"></i>Tersimpan di Server (berlaku untuk semua)</p>
+                                </div>
+                            </div>
+                            <form id="examSettingsForm">
+                                <div class="mb-4">
+                                    <label for="examDuration" class="block text-sm font-medium text-gray-700 mb-2">Durasi Waktu Ujian (menit)</label>
+                                    <p class="text-xs text-gray-500 mb-2">Atur berapa lama waktu yang dimiliki siswa untuk menyelesaikan ujian.</p>
                                     <input type="number" id="examDuration" name="examDuration" min="1" required
                                            class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                            value="${currentDuration}">
                                 </div>
-                                <hr class="my-6 border-gray-200">
-                                <div class="mb-6">
-                                    <label for="geminiApiKey" class="block text-lg font-medium text-gray-700 mb-2">Google Gemini API Key</label>
-                                    <p class="text-sm text-gray-500 mb-3">Masukkan API Key Anda untuk mengaktifkan fitur pembuatan soal otomatis. Key akan disimpan di browser ini.</p>
-                                    <input type="password" id="geminiApiKey" name="geminiApiKey"
-                                           class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                           placeholder="AIzaSy..." value="${currentApiKey}">
-                                    <div class="mt-2 text-xs text-blue-600">
-                                        <a href="https://aistudio.google.com/app/apikey" target="_blank" class="hover:underline">Dapatkan API Key di sini</a>
-                                    </div>
-                                </div>
                                 <div class="flex justify-end">
-                                    <button type="submit" class="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition duration-200 font-semibold">
-                                        <i class="fas fa-save mr-2"></i>Simpan Pengaturan
+                                    <button type="submit" id="saveExamSettingsBtn" class="bg-blue-600 text-white px-5 py-2 rounded-lg hover:bg-blue-700 transition duration-200 font-semibold text-sm">
+                                        <i class="fas fa-save mr-2"></i>Simpan Durasi
                                     </button>
                                 </div>
                             </form>
                         </div>
-                        <div id="blockedStudentsSection" class="mt-12"></div>
+
+                        <!-- Card 2: API Key (Local Browser) -->
+                        <div class="max-w-lg mx-auto bg-white rounded-lg shadow p-6 mb-6">
+                            <div class="flex items-center gap-3 mb-4">
+                                <div class="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center">
+                                    <i class="fas fa-key text-amber-600"></i>
+                                </div>
+                                <div>
+                                    <h3 class="text-lg font-semibold text-gray-900">Google Gemini API Key</h3>
+                                    <p class="text-xs text-gray-500"><i class="fas fa-laptop mr-1"></i>Tersimpan di Browser ini saja (privat)</p>
+                                </div>
+                            </div>
+                            <form id="apiKeyForm">
+                                <div class="mb-4">
+                                    <label for="geminiApiKey" class="block text-sm font-medium text-gray-700 mb-2">API Key untuk Pembuatan Soal Otomatis</label>
+                                    <p class="text-xs text-gray-500 mb-2">Masukkan API Key Anda untuk mengaktifkan fitur AI. Key ini hanya tersimpan di browser ini dan tidak dikirim ke server.</p>
+                                    <input type="password" id="geminiApiKey" name="geminiApiKey"
+                                           class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500"
+                                           placeholder="AIzaSy..." value="${currentApiKey}">
+                                    <div class="mt-2 text-xs text-blue-600">
+                                        <a href="https://aistudio.google.com/app/apikey" target="_blank" class="hover:underline"><i class="fas fa-external-link-alt mr-1"></i>Dapatkan API Key di sini</a>
+                                    </div>
+                                </div>
+                                <div class="flex justify-end">
+                                    <button type="submit" id="saveApiKeyBtn" class="bg-amber-600 text-white px-5 py-2 rounded-lg hover:bg-amber-700 transition duration-200 font-semibold text-sm">
+                                        <i class="fas fa-save mr-2"></i>Simpan API Key
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+
+                        <div id="blockedStudentsSection" class="mt-8"></div>
                     </div>
                 `;
 
-                document.getElementById('settingsForm').addEventListener('submit', async (e) => {
+                // Form 1: Exam Duration Settings (synced to server)
+                document.getElementById('examSettingsForm').addEventListener('submit', async (e) => {
                     e.preventDefault();
                     const newDuration = parseInt(document.getElementById('examDuration').value);
-                    const newApiKey = document.getElementById('geminiApiKey').value.trim();
 
                     if (isNaN(newDuration) || newDuration <= 0) {
                         UI.showNotification('Masukkan durasi yang valid.', 'error');
                         return;
                     }
 
-                    const submitButton = e.target.querySelector('button[type="submit"]');
+                    const submitButton = document.getElementById('saveExamSettingsBtn');
                     submitButton.disabled = true;
                     submitButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Menyimpan...';
 
                     try {
-                        // Arsitektur baru: Simpan ke IndexedDB dulu, lalu sync ke server
                         await DataService.saveSettings({
                             key: 'examConfig',
                             durationMinutes: newDuration
                         });
-
-                        // Save API Key to localStorage (Private setting per browser)
-                        if (newApiKey) {
-                            localStorage.setItem('geminiApiKey', newApiKey);
-                        } else {
-                            localStorage.removeItem('geminiApiKey');
-                        }
-
-                        UI.showNotification('Pengaturan berhasil disimpan!', 'success');
+                        UI.showNotification('Durasi ujian berhasil disimpan!', 'success');
                     } catch (error) {
-                        console.error("Error saving settings:", error);
-                        UI.showNotification('Gagal menyimpan pengaturan!', 'error');
+                        console.error("Error saving exam settings:", error);
+                        UI.showNotification('Gagal menyimpan durasi ujian!', 'error');
                     } finally {
                         submitButton.disabled = false;
-                        submitButton.innerHTML = '<i class="fas fa-save mr-2"></i>Simpan Pengaturan';
+                        submitButton.innerHTML = '<i class="fas fa-save mr-2"></i>Simpan Durasi';
+                    }
+                });
+
+                // Form 2: API Key Settings (stored locally)
+                document.getElementById('apiKeyForm').addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const newApiKey = document.getElementById('geminiApiKey').value.trim();
+
+                    const submitButton = document.getElementById('saveApiKeyBtn');
+                    submitButton.disabled = true;
+                    submitButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Menyimpan...';
+
+                    try {
+                        if (newApiKey) {
+                            localStorage.setItem('geminiApiKey', newApiKey);
+                            UI.showNotification('API Key berhasil disimpan di browser ini!', 'success');
+                        } else {
+                            localStorage.removeItem('geminiApiKey');
+                            UI.showNotification('API Key berhasil dihapus!', 'success');
+                        }
+                    } catch (error) {
+                        console.error("Error saving API key:", error);
+                        UI.showNotification('Gagal menyimpan API Key!', 'error');
+                    } finally {
+                        submitButton.disabled = false;
+                        submitButton.innerHTML = '<i class="fas fa-save mr-2"></i>Simpan API Key';
                     }
                 });
 
@@ -3887,7 +5451,7 @@
                 this.renderBlockedStudents();
             },
 
-            async renderBlockedStudents() {
+            async renderBlockedStudents(forceRefresh = false) {
                 const section = document.getElementById('blockedStudentsSection');
                 if (!section) return;
 
@@ -3921,10 +5485,10 @@
 
                 const tableBody = document.getElementById('blockedStudentsTableBody');
                 const unblockAllBtn = document.getElementById('unblockAllBtn');
-                
+
                 try {
                     // Arsitektur baru: IndexedDB → Google Apps Script
-                    const blockedList = await DataService.getBlockedStudents();
+                    const blockedList = await DataService.getBlockedStudents(forceRefresh);
                     
                     if (!blockedList || blockedList.length === 0) {
                         tableBody.innerHTML = '<tr><td colspan="6" class="p-4 text-center text-gray-500">Tidak ada siswa yang terblokir saat ini.</td></tr>';
@@ -4473,16 +6037,22 @@
                     }
                     
                     const typeOrder = { 'pilihan_ganda': 1, 'isian': 2, 'uraian': 3 };
-                    
+
+                    // Sort by: 1. Mata Pelajaran, 2. Tipe (PG → Isian/Essai → Uraian), 3. Creation time
                     filteredQuestions.sort((a, b) => {
+                        // 1. Sort by mataPelajaran first
+                        const mataPelajaranCompare = (a.mataPelajaran || '').localeCompare(b.mataPelajaran || '', 'id-ID');
+                        if (mataPelajaranCompare !== 0) return mataPelajaranCompare;
+
+                        // 2. Sort by tipe (pilihan_ganda → isian → uraian)
                         const typeA = typeOrder[a.tipe] || 99;
                         const typeB = typeOrder[b.tipe] || 99;
+                        if (typeA !== typeB) return typeA - typeB;
 
-                        if (typeA !== typeB) return typeA - typeB; 
-
+                        // 3. Sort by creation time
                         const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
                         const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-                        return timeA - timeB; 
+                        return timeA - timeB;
                     });
 
                     AppState.questions = filteredQuestions.map((q, index) => ({
@@ -4575,12 +6145,22 @@
                 document.getElementById('nextQuestionBtn').innerHTML = AppState.currentQuestion === AppState.questions.length - 1 ? 'Selesai <i class="fas fa-flag-checkered ml-2"></i>' : 'Selanjutnya <i class="fas fa-chevron-right ml-2"></i>';
                 
                 questionContent.querySelectorAll('input[name="answer"], textarea[name="answer"]').forEach(input => {
-                    input.addEventListener('change', () => {
+                    // Use 'input' event for real-time updates on text/textarea
+                    const eventType = (input.type === 'radio') ? 'change' : 'input';
+                    input.addEventListener(eventType, () => {
                         if (input.type === 'radio') AppState.examAnswers[AppState.currentQuestion] = parseInt(input.value);
                         else AppState.examAnswers[AppState.currentQuestion] = input.value;
                         this.updateQuestionNavigation();
                         this.updateProgress();
                     });
+                    // Also listen to change event for radio buttons and final blur
+                    if (input.type !== 'radio') {
+                        input.addEventListener('change', () => {
+                            AppState.examAnswers[AppState.currentQuestion] = input.value;
+                            this.updateQuestionNavigation();
+                            this.updateProgress();
+                        });
+                    }
                 });
             },
 
@@ -4588,10 +6168,15 @@
                 const navigationModal = document.getElementById('questionListModalContent');
                 if (!navigationModal) return;
                 navigationModal.innerHTML = Array.from({ length: AppState.questions.length }, (_, i) => {
+                    const isAnswered = AppState.examAnswers[i] !== undefined && AppState.examAnswers[i] !== '';
+                    const isCurrent = i === AppState.currentQuestion;
+                    // Priority: if answered, show green (answered). Current indicator shown via border.
                     let stateClass = 'unanswered';
-                    if (i === AppState.currentQuestion) stateClass = 'current';
-                    else if (AppState.examAnswers[i] !== undefined && AppState.examAnswers[i] !== '') stateClass = 'answered';
-                    return `<button class="question-nav-btn w-12 h-12 rounded-full border-2 text-sm font-bold ${stateClass}" onclick="UI.goToQuestionFromModal(${i})">${i + 1}</button>`;
+                    if (isAnswered) stateClass = 'answered';
+                    else if (isCurrent) stateClass = 'current';
+                    // Add extra styling for current question
+                    const currentBorder = isCurrent ? 'ring-2 ring-offset-2 ring-blue-500' : '';
+                    return `<button class="question-nav-btn w-12 h-12 rounded-full border-2 text-sm font-bold ${stateClass} ${currentBorder}" onclick="UI.goToQuestionFromModal(${i})">${i + 1}</button>`;
                 }).join('');
             },
 
@@ -4736,6 +6321,9 @@
                         keterangan: finalScore >= 70 ? 'Lulus' : 'Tidak Lulus',
                         waktuSelesai: new Date().toLocaleString('id-ID')
                     });
+
+                    // Queue sudah otomatis diproses oleh queueOperation()
+                    // Tidak perlu memanggil processSyncQueue() lagi untuk menghindari duplikasi
 
                     Swal.fire({
                         title: 'Ujian Selesai!',
@@ -4984,12 +6572,24 @@
                             filteredQuestions = filteredQuestions.filter(q => q.kelas && q.kelas.startsWith(teacherGrade));
                         }
                         
-                        // Sort by type and creation time
+                        // Sort by: 1. Mata Pelajaran, 2. Tipe (PG → Isian → Uraian), 3. No Soal
                         const typeOrder = { 'pilihan_ganda': 1, 'isian': 2, 'uraian': 3 };
                         filteredQuestions.sort((a, b) => {
+                            // 1. Sort by mataPelajaran first
+                            const mataPelajaranCompare = (a.mataPelajaran || '').localeCompare(b.mataPelajaran || '', 'id-ID');
+                            if (mataPelajaranCompare !== 0) return mataPelajaranCompare;
+
+                            // 2. Sort by tipe (pilihan_ganda → isian → uraian)
                             const typeA = typeOrder[a.tipe] || 99;
                             const typeB = typeOrder[b.tipe] || 99;
                             if (typeA !== typeB) return typeA - typeB;
+
+                            // 3. Sort by noSoal (numeric)
+                            const noA = parseInt(a.noSoal) || 0;
+                            const noB = parseInt(b.noSoal) || 0;
+                            if (noA !== noB && (noA !== 0 || noB !== 0)) return noA - noB;
+
+                            // 4. Sort by creation time (fallback)
                             const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
                             const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
                             return timeA - timeB;
@@ -5015,9 +6615,24 @@
                 AppState.pagination.questions.totalItems = cachedData.length;
                 const start = (AppState.pagination.questions.currentPage - 1) * AppState.itemsPerPage;
                 const end = start + AppState.itemsPerPage;
-                const paginatedItems = cachedData.slice(start, end);
 
-                Management.renderFilteredQuestions(paginatedItems);
+                // Calculate question numbers for ALL questions first (before pagination)
+                let currentSubject = null;
+                let subjectQuestionNumber = 0;
+                const allQuestionsWithNumbers = cachedData.map((question) => {
+                    if (question.mataPelajaran !== currentSubject) {
+                        currentSubject = question.mataPelajaran;
+                        subjectQuestionNumber = 1;
+                    } else {
+                        subjectQuestionNumber++;
+                    }
+                    return { ...question, displayNumber: subjectQuestionNumber };
+                });
+
+                // Now slice for pagination (numbers are already calculated correctly)
+                const paginatedItems = allQuestionsWithNumbers.slice(start, end);
+
+                Management.renderFilteredQuestions(paginatedItems, allQuestionsWithNumbers, start);
 
                 UI.renderPaginationControls('questionsPagination', AppState.pagination.questions, (newPage) => {
                     AppState.pagination.questions.currentPage = newPage;
@@ -5074,7 +6689,21 @@
                             return true;
                         });
                         
-                        filteredResults.sort((a, b) => a.noSoal - b.noSoal);
+                        // Sort by: mataPelajaran, namaLengkap, noSoal
+                        filteredResults.sort((a, b) => {
+                            // 1. Sort by mataPelajaran
+                            const mataPelajaranCompare = (a.mataPelajaran || '').localeCompare(b.mataPelajaran || '', 'id-ID');
+                            if (mataPelajaranCompare !== 0) return mataPelajaranCompare;
+                            
+                            // 2. Sort by namaLengkap
+                            const namaCompare = (a.namaLengkap || '').localeCompare(b.namaLengkap || '', 'id-ID');
+                            if (namaCompare !== 0) return namaCompare;
+                            
+                            // 3. Sort by noSoal (numeric)
+                            const noSoalA = parseInt(a.noSoal) || 0;
+                            const noSoalB = parseInt(b.noSoal) || 0;
+                            return noSoalA - noSoalB;
+                        });
                         AppState.cache.set(cacheKey, filteredResults);
                         
                         this.renderResultsFromCache(filteredResults);
@@ -5123,13 +6752,71 @@
                     AppState.cache.delete(cacheKey);
                 }
                 
-                // Check cache first
+                // === APPLY PENDING GRADE UPDATES ===
+                // Jika ada pending updates dari edit hasil ujian, terapkan ke cache
+                const hasPendingUpdates = Object.keys(AppState.pendingGradeUpdates).length > 0;
+                if (hasPendingUpdates) {
+                    console.log('[Grades] Applying pending updates:', AppState.pendingGradeUpdates);
+                    
+                    // Apply to global cache
+                    const globalCache = CacheHelper.getCached('grades') || [];
+                    for (const key in AppState.pendingGradeUpdates) {
+                        const [studentName, examCode] = key.split('|');
+                        const update = AppState.pendingGradeUpdates[key];
+                        
+                        const gradeIdx = globalCache.findIndex(g => 
+                            g.namaSiswa === studentName && g.kodeSoal === examCode
+                        );
+                        
+                        if (gradeIdx !== -1) {
+                            globalCache[gradeIdx].nilai = update.nilai;
+                            globalCache[gradeIdx].grade = update.grade;
+                            globalCache[gradeIdx].keterangan = update.keterangan;
+                            console.log(`[Grades] Applied pending update for ${studentName}: ${update.nilai}`);
+                        }
+                    }
+                    
+                    // Save updated global cache
+                    if (globalCache.length > 0) {
+                        AppState.cache.set('grades', { data: globalCache, timestamp: Date.now(), valid: true });
+                    }
+                    
+                    // Clear filtered cache so it gets regenerated
+                    AppState.cache.delete(cacheKey);
+                    
+                    // Clear pending updates
+                    AppState.pendingGradeUpdates = {};
+                }
+                
+                // Check filtered cache first
                 let cachedData = AppState.cache.get(cacheKey);
                 
-                // If cache exists, use it immediately (no loading spinner)
+                // If filtered cache exists, use it immediately
                 if (cachedData && cachedData.length >= 0) {
-                    console.log('[Grades] Using cached data:', cachedData.length, 'items');
+                    console.log('[Grades] Using filtered cache:', cachedData.length, 'items');
                     this.renderGradesFromCache(cachedData, filters);
+                    return;
+                }
+                
+                // FALLBACK: Check global grades cache and filter locally
+                const globalCache = CacheHelper.getCached('grades');
+                if (globalCache && globalCache.length > 0) {
+                    console.log('[Grades] Using global cache, filtering locally...');
+                    let filteredGrades = globalCache.filter(g => {
+                        if (filters.tahunAjaran && g.tahunAjaran !== filters.tahunAjaran) return false;
+                        if (filters.semester && g.semester !== filters.semester) return false;
+                        if (filters.kodeSoal && g.kodeSoal !== filters.kodeSoal) return false;
+                        if (filters.mataPelajaran && g.mataPelajaran !== filters.mataPelajaran) return false;
+                        if (filters.kelas && g.kelas !== filters.kelas) return false;
+                        if (filters.namaSiswa && g.namaSiswa !== filters.namaSiswa) return false;
+                        return true;
+                    });
+                    filteredGrades.sort((a, b) => (a.namaSiswa || '').localeCompare(b.namaSiswa || ''));
+                    
+                    // Save to filtered cache for next time
+                    AppState.cache.set(cacheKey, filteredGrades);
+                    
+                    this.renderGradesFromCache(filteredGrades, filters);
                     return;
                 }
                 
@@ -5188,6 +6875,17 @@
                     AppState.pagination.grades.currentPage = newPage;
                     this.loadAndRenderPaginatedGrades();
                 });
+            },
+
+            // AUTO-REFRESH: Refresh UI Daftar Nilai jika sedang terbuka
+            refreshGradesUIIfVisible() {
+                const gradesTableBody = document.getElementById('gradesTableBody');
+                // Cek apakah menu Daftar Nilai sedang aktif/terlihat
+                if (gradesTableBody && gradesTableBody.offsetParent !== null) {
+                    console.log('[UI] Auto-refreshing grades table from cache...');
+                    // Refresh dari cache (bukan dari server) - instant!
+                    this.loadAndRenderPaginatedGrades(false);
+                }
             },
 
             // Fungsi untuk refresh data grades dari server secara manual
@@ -5252,6 +6950,10 @@
 
             // Initialize SyncManager first
             await SyncManager.init();
+            
+            // Initialize IndexedDB dan BackgroundSync
+            await IndexedDBService.init();
+            BackgroundSync.init();
 
             // Show loading state while fetching user data
             loginButton.disabled = true;
@@ -5259,7 +6961,21 @@
             usernameInput.disabled = true;
             passwordInput.disabled = true;
 
-            const dataLoaded = await fetchUsersFromGoogleScript();
+            // Try loading from IndexedDB cache first for faster startup
+            let dataLoaded = false;
+            const cachedUsers = await IndexedDBService.getAll('users');
+            
+            if (cachedUsers && cachedUsers.length > 0) {
+                AppState.users = cachedUsers;
+                dataLoaded = true;
+                console.log('Users loaded from IndexedDB cache:', cachedUsers.length);
+                
+                // Trigger background sync untuk fresh data
+                BackgroundSync.syncStore('users');
+            } else {
+                // Fallback ke fetch dari server
+                dataLoaded = await fetchUsersFromGoogleScript();
+            }
 
             if (dataLoaded) {
                  // Restore login form state
@@ -5275,7 +6991,7 @@
             }
 
 
-            loginForm.addEventListener('submit', function(e) {
+            loginForm.addEventListener('submit', async function(e) {
                 e.preventDefault();
                 const username = document.getElementById('username').value.trim();
                 const password = document.getElementById('password').value.trim();
@@ -5283,7 +6999,25 @@
                 loginError.classList.add('hidden');
                 
                 const result = Auth.login(username, password);
-                if (result.success) UI.showDashboard();
+                if (result.success) {
+                    // Disable form briefly
+                    loginButton.disabled = true;
+                    usernameInput.disabled = true;
+                    passwordInput.disabled = true;
+                    loginButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Masuk...';
+                    
+                    // Trigger background sync untuk data terbaru
+                    BackgroundSync.syncAll();
+                    
+                    // Show dashboard langsung (data dari IndexedDB cache)
+                    UI.showDashboard();
+                    
+                    // Reset form state
+                    loginButton.disabled = false;
+                    loginButton.innerHTML = 'Login';
+                    usernameInput.disabled = false;
+                    passwordInput.disabled = false;
+                }
                 else {
                     loginError.textContent = result.message;
                     loginError.classList.remove('hidden');
@@ -5370,6 +7104,10 @@
         window.UI = UI;
         window.Auth = Auth;
         window.GeminiHelper = GeminiHelper;
+        window.CacheHelper = CacheHelper;
+        window.IndexedDBService = IndexedDBService;
+        window.BackgroundSync = BackgroundSync;
+        window.DataService = DataService;
     </script>
 </body>
 </html>
